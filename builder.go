@@ -61,13 +61,14 @@ func main() {
 		}
 		defer reader.Close()
 
-		// 官方標準：Load 只帶基礎 Options (無 Inserter 欄位)
+		// 嘗試使用官方預設 Load
 		writer, err = mmdbwriter.Load(baseFile, mmdbwriter.Options{
 			RecordSize: 24,
 		})
 		if err != nil {
 			fmt.Printf("Warning: Direct mmdbwriter.Load failed (%v). Creating fresh Tree and copying records...\n", err)
-			// 若 base MMDB 含有 Aliased 衝突網段，改用安全遍歷 (Traverse) 複製
+			
+			// 建一個新的 Tree
 			writer, err = mmdbwriter.New(mmdbwriter.Options{
 				DatabaseType: "GeoIP2-Country",
 				RecordSize:   24,
@@ -77,17 +78,31 @@ func main() {
 				os.Exit(1)
 			}
 
-			// 手動 Safe Traverse 將 Base MMDB 內容寫入新樹
+			// 跳過 Aliased 網絡，手動將 Base MMDB 的網絡結構遍歷複製進新 Tree
 			networks := reader.Networks(maxminddb.SkipAliasedNetworks)
 			for networks.Next() {
-				var record interface{}
+				var record map[string]interface{}
 				subnet, err := networks.Network(&record)
-				if err != nil {
+				if err != nil || subnet == nil {
 					continue
 				}
-				// 轉換為 mmdbtype 並寫入
-				if mmdbRecord, err := mmdbtype.FromMap(record); err == nil {
-					_ = writer.InsertFunc(subnet, inserter.TopLevelPropertyWith(inserter.Replace), mmdbRecord)
+
+				// 提取 ISO Code (如果有 Country Code)
+				isoCode := ""
+				if country, ok := record["country"].(map[string]interface{}); ok {
+					if iso, ok := country["iso_code"].(string); ok {
+						isoCode = iso
+					}
+				}
+
+				if isoCode != "" {
+					mmdbRecord := mmdbtype.Map{
+						"country": mmdbtype.Map{
+							"iso_code": mmdbtype.String(isoCode),
+						},
+					}
+					// 官方標準寫法: InsertFunc 接收 3 個參數: (subnet, inserter.Func, record)
+					_ = writer.InsertFunc(subnet, inserter.OldRecord, mmdbRecord)
 				}
 			}
 		}
@@ -160,7 +175,7 @@ func main() {
 			}
 		}
 
-		// 執行剔除與寫入 (使用官方推薦的 InsertFunc + inserter.TopLevelPropertyWith)
+		// 執行剔除與寫入 (使用官方真實導出的 inserter.OldRecord 進行覆蓋)
 		var finalCIDRs []string
 		for cidr := range ruleMap {
 			if !excludeMap[cidr] {
@@ -173,8 +188,8 @@ func main() {
 							"iso_code": mmdbtype.String(strings.ToUpper(tag)),
 						},
 					}
-					// 官方標準: InsertFunc(ipnet, inserter.TopLevelPropertyWith(inserter.Replace), record)
-					err := writer.InsertFunc(ipnet, inserter.TopLevelPropertyWith(inserter.Replace), record)
+					// 3 個參數：(ipnet, inserterFunc, record)
+					err := writer.InsertFunc(ipnet, inserter.OldRecord, record)
 					if err != nil {
 						fmt.Printf("Warning: Skipping insert for %s: %v\n", cidr, err)
 					}
