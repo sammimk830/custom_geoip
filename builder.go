@@ -9,14 +9,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/maxmind/mmdbwriter"
 	"github.com/maxmind/mmdbwriter/mmdbtype"
 	"github.com/oschwald/maxminddb-golang"
-	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
@@ -29,11 +27,6 @@ type Category struct {
 	LocalFiles   []string      `json:"local_files"`
 	InlineRules  []string      `json:"inline_rules"`
 	ExcludeRules []string      `json:"exclude_rules"`
-}
-
-type URLItem struct {
-	URL  string `json:"url"`
-	Attr string `json:"attr"`
 }
 
 func main() {
@@ -49,7 +42,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 1. 初始化 MMDB Writer (如果 base_mmdb_url 存在，載入現有 MMDB 作為基底)
+	// 1. 初始化 MMDB Writer
 	var writer *mmdbwriter.Tree
 	if cfg.BaseMMDBURL != "" {
 		fmt.Printf("Downloading base MMDB from %s...\n", cfg.BaseMMDBURL)
@@ -66,9 +59,9 @@ func main() {
 		}
 		defer reader.Close()
 
+		// 載入現有 MMDB 樹狀結構
 		writer, err = mmdbwriter.Load(baseFile, mmdbwriter.Options{
 			RecordSize: 24,
-			InsertStrategy: mmdbwriter.ReplaceWithCloserInsertStrategy,
 		})
 		if err != nil {
 			fmt.Printf("Failed to load base MMDB into writer: %v\n", err)
@@ -151,13 +144,16 @@ func main() {
 
 				_, ipnet, err := net.ParseCIDR(cidr)
 				if err == nil {
-					// 注入 MMDB
+					// 注入 MMDB (Country 格式)
 					record := mmdbtype.Map{
 						"country": mmdbtype.Map{
 							"iso_code": mmdbtype.String(strings.ToUpper(tag)),
 						},
 					}
-					writer.Insert(ipnet, record)
+					// mmdbwriter.InsertFuncFunc 或默認 Insert 行為
+					if err := writer.Insert(ipnet, record); err != nil {
+						fmt.Printf("Warning: Failed to insert %s: %v\n", cidr, err)
+					}
 				}
 			}
 		}
@@ -167,7 +163,7 @@ func main() {
 		fmt.Printf("  └─ Tag [%s] completed with %d CIDR entries.\n", tag, len(finalCIDRs))
 	}
 
-	// 3. 匯出合併後的 final Country.mmdb
+	// 3. 匯出合併後的 Country.mmdb
 	outMMDB, err := os.Create("Country.mmdb")
 	if err != nil {
 		fmt.Printf("Failed to create Country.mmdb: %v\n", err)
