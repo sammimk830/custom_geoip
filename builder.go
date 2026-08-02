@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	"github.com/maxmind/mmdbwriter"
-	"github.com/maxmind/mmdbwriter/inserter"
 	"github.com/maxmind/mmdbwriter/mmdbtype"
 	"github.com/oschwald/maxminddb-golang"
 )
@@ -60,10 +59,16 @@ func main() {
 		}
 		defer reader.Close()
 
-		// 關鍵修正：使用標準的 inserter.Replace 策略，完美解決重疊網段與 Aliased Network
+		// 自訂全相容 FuncGenerator，處理衝突與 2001::/32 重疊網段
+		customInserter := func(_ mmdbwriter.InserterFunc) mmdbwriter.InserterFunc {
+			return func(newVal, _ mmdbtype.DataType) (mmdbtype.DataType, error) {
+				return newVal, nil
+			}
+		}
+
 		writer, err = mmdbwriter.Load(baseFile, mmdbwriter.Options{
 			RecordSize: 24,
-			Inserter:   inserter.Replace,
+			Inserter:   customInserter,
 		})
 		if err != nil {
 			fmt.Printf("Failed to load base MMDB into writer: %v\n", err)
