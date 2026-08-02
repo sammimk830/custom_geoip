@@ -60,10 +60,10 @@ func main() {
 		}
 		defer reader.Close()
 
-		// 使用 inserter.ReplaceWithCloser 解決 2001::/32 等 Aliased Network 重疊問題
+		// 使用 inserter.TopLevelPropertyWithCloser 合併處理 base MMDB 內的重疊網絡
 		writer, err = mmdbwriter.Load(baseFile, mmdbwriter.Options{
 			RecordSize: 24,
-			Inserter:   inserter.ReplaceWithCloser,
+			Inserter:   inserter.TopLevelPropertyWithCloser,
 		})
 		if err != nil {
 			fmt.Printf("Failed to load base MMDB into writer: %v\n", err)
@@ -152,8 +152,8 @@ func main() {
 							"iso_code": mmdbtype.String(strings.ToUpper(tag)),
 						},
 					}
-					// 採用 ReplaceWithCloser 覆蓋插入
-					if err := writer.InsertFunc(ipnet, inserter.ReplaceWithCloser, record); err != nil {
+					// 使用已配置好的預設 Insert (會自動套用初始化時的 inserter 策略)
+					if err := writer.Insert(ipnet, record); err != nil {
 						fmt.Printf("Warning: Skipping insert for %s: %v\n", cidr, err)
 					}
 				}
