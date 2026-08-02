@@ -13,7 +13,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write     # 確保 Actions 有權限發布 Release
+      contents: write
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v4
@@ -44,26 +44,76 @@ jobs:
           # 將自訂 data/ 資料夾複製到編譯器目錄
           cp -r data compiler/
           
-          # 如果成功下載了 base.mmdb，也複製過去供編譯器合併
-          if [ -f "base.mmdb" ]; then
-            cp base.mmdb compiler/
-          fi
-          
           cd compiler
           
-          # 呼叫官方編譯工具 (如果存在 base.mmdb 會自動作為基礎合併)
-          if [ -f "base.mmdb" ]; then
-            go run ./ --input ./data --base ./base.mmdb --output ./output
+          # 如果存在 base.mmdb，則將其作為 maxminddb 輸入，並覆蓋疊加 data/ 目錄下的自訂 IP
+          if [ -f "../base.mmdb" ]; then
+            cp ../base.mmdb ./base.mmdb
+            cat << 'EOF' > config.json
+{
+  "input": [
+    {
+      "type": "maxminddb",
+      "action": "add",
+      "args": {
+        "uri": "./base.mmdb"
+      }
+    },
+    {
+      "type": "v2rayCustom",
+      "action": "add",
+      "args": {
+        "dir": "./data"
+      }
+    }
+  ],
+  "output": [
+    {
+      "type": "v2rayGeoIPDat",
+      "action": "output",
+      "args": {
+        "outputName": "geoip.dat",
+        "outputDir": "./output"
+      }
+    }
+  ]
+}
+EOF
           else
-            go run ./ --input ./data --output ./output
+            cat << 'EOF' > config.json
+{
+  "input": [
+    {
+      "type": "v2rayCustom",
+      "action": "add",
+      "args": {
+        "dir": "./data"
+      }
+    }
+  ],
+  "output": [
+    {
+      "type": "v2rayGeoIPDat",
+      "action": "output",
+      "args": {
+        "outputName": "geoip.dat",
+        "outputDir": "./output"
+      }
+    }
+  ]
+}
+EOF
           fi
+          
+          # 執行官方編譯器 (讀取自動生成的 config.json)
+          go run ./
           
           if [ -f "output/geoip.dat" ]; then
             mv output/geoip.dat ../geoip.dat
             sha256sum ../geoip.dat | awk '{print $1}' > ../geoip.dat.sha256sum
           fi
 
-      # Step 1: 建立帶時間戳記的獨立歷史 Release (例如 Tag: 20260802160842)
+      # 1. 建立獨立時間戳記 Release (例如 Tag: 20260802161231)
       - name: Release geoip.dat (Timestamp)
         uses: softprops/action-gh-release@v2
         with:
@@ -78,7 +128,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Step 2: 同時更新固定標籤 (release)，供 Client 端用固定連結直連訂閱
+      # 2. 同時更新固定 Latest Tag (release)
       - name: Update Latest Tag
         uses: softprops/action-gh-release@v2
         with:
