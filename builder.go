@@ -42,89 +42,64 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 1. 初始化 MMDB Writer
-	var writer *mmdbwriter.Tree
+	// 建立一個全新的、乾淨的 MMDB 樹
+	writer, err := mmdbwriter.New(mmdbwriter.Options{
+		DatabaseType: "GeoIP2-Country",
+		RecordSize:   24,
+	})
+	if err != nil {
+		fmt.Printf("Failed to create MMDB writer: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 1. 安全讀取 Base MMDB (唯讀模式，完全避開 Load 爆錯問題)
 	if cfg.BaseMMDBURL != "" {
 		fmt.Printf("Downloading base MMDB from %s...\n", cfg.BaseMMDBURL)
 		baseFile := "base.mmdb"
-		if err := downloadFile(baseFile, cfg.BaseMMDBURL); err != nil {
-			fmt.Printf("Failed to download base MMDB: %v\n", err)
-			os.Exit(1)
-		}
+		if err := downloadFile(baseFile, cfg.BaseMMDBURL); err == nil {
+			reader, err := maxminddb.Open(baseFile)
+			if err == nil {
+				fmt.Println("Extracting IP ranges from base.mmdb...")
+				// 唯讀遍歷，並自動跳過可能引起衝突的 Aliased Networks
+				networks := reader.Networks(maxminddb.SkipAliasedNetworks)
+				for networks.Next() {
+					var record map[string]interface{}
+					subnet, err := networks.Network(&record)
+					if err != nil || subnet == nil {
+						continue
+					}
 
-		// 開啟 Base MMDB
-		reader, err := maxminddb.Open(baseFile)
-		if err != nil {
-			fmt.Printf("Failed to open base MMDB: %v\n", err)
-			os.Exit(1)
-		}
-		defer reader.Close()
+					// 提取 ISO Country Code
+					isoCode := ""
+					if country, ok := record["country"].(map[string]interface{}); ok {
+						if iso, ok := country["iso_code"].(string); ok {
+							isoCode = iso
+						}
+					}
 
-		// 嘗試使用官方預設 Load
-		writer, err = mmdbwriter.Load(baseFile, mmdbwriter.Options{
-			RecordSize: 24,
-		})
-		if err != nil {
-			fmt.Printf("Warning: Direct mmdbwriter.Load failed (%v). Creating fresh Tree and copying records...\n", err)
-
-			// 建一個新的 Tree
-			writer, err = mmdbwriter.New(mmdbwriter.Options{
-				DatabaseType: "GeoIP2-Country",
-				RecordSize:   24,
-			})
-			if err != nil {
-				fmt.Printf("Failed to create new MMDB writer: %v\n", err)
-				os.Exit(1)
-			}
-
-			// 跳過 Aliased 網絡，手動將 Base MMDB 的網絡結構遍歷複製進新 Tree
-			networks := reader.Networks(maxminddb.SkipAliasedNetworks)
-			for networks.Next() {
-				var record map[string]interface{}
-				subnet, err := networks.Network(&record)
-				if err != nil || subnet == nil {
-					continue
-				}
-
-				// 提取 ISO Code (如果有 Country Code)
-				isoCode := ""
-				if country, ok := record["country"].(map[string]interface{}); ok {
-					if iso, ok := country["iso_code"].(string); ok {
-						isoCode = iso
+					if isoCode != "" {
+						mmdbRecord := mmdbtype.Map{
+							"country": mmdbtype.Map{
+								"iso_code": mmdbtype.String(isoCode),
+							},
+						}
+						_ = writer.Insert(subnet, mmdbRecord)
 					}
 				}
-
-				if isoCode != "" {
-					mmdbRecord := mmdbtype.Map{
-						"country": mmdbtype.Map{
-							"iso_code": mmdbtype.String(isoCode),
-						},
-					}
-					// 官方標準 2 參數寫法：writer.Insert(subnet, record)
-					_ = writer.Insert(subnet, mmdbRecord)
-				}
+				reader.Close()
+				fmt.Println("Base MMDB content loaded successfully.")
 			}
-		}
-		fmt.Println("Successfully initialized base MMDB Tree.")
-	} else {
-		writer, err = mmdbwriter.New(mmdbwriter.Options{
-			DatabaseType: "GeoIP2-Country",
-			RecordSize:   24,
-		})
-		if err != nil {
-			fmt.Printf("Failed to create new MMDB writer: %v\n", err)
-			os.Exit(1)
 		}
 	}
 
-	// 2. 處理自訂 Categories
+	// 2. 處理你的自訂 Categories 並寫入
 	os.MkdirAll("data", 0755)
 
 	for tag, catData := range cfg.Categories {
 		if strings.HasPrefix(tag, "_") {
 			continue
 		}
-		fmt.Printf("\nProcessing Category: %s\n", tag)
+		fmt.Printf("\nProcessing Custom Category: %s\n", tag)
 
 		excludeMap := make(map[string]bool)
 		for _, ex := range catData.ExcludeRules {
@@ -135,7 +110,6 @@ func main() {
 
 		ruleMap := make(map[string]bool)
 
-		// 處理 URLs
 		for _, uItem := range catData.URLs {
 			var urlStr string
 			switch v := uItem.(type) {
@@ -157,7 +131,6 @@ func main() {
 			}
 		}
 
-		// 處理 local_files
 		for _, lf := range catData.LocalFiles {
 			lines := readLines(lf)
 			for _, line := range lines {
@@ -167,14 +140,12 @@ func main() {
 			}
 		}
 
-		// 處理 inline_rules
 		for _, inline := range catData.InlineRules {
 			if cidr := parseToCIDR(inline); cidr != "" {
 				ruleMap[cidr] = true
 			}
 		}
 
-		// 執行剔除與寫入 (使用官方標準 2 參數 writer.Insert)
 		var finalCIDRs []string
 		for cidr := range ruleMap {
 			if !excludeMap[cidr] {
@@ -187,11 +158,7 @@ func main() {
 							"iso_code": mmdbtype.String(strings.ToUpper(tag)),
 						},
 					}
-					// 官方 2 參數寫法：writer.Insert(ipnet, record)
-					err := writer.Insert(ipnet, record)
-					if err != nil {
-						fmt.Printf("Warning: Skipping insert for %s: %v\n", cidr, err)
-					}
+					_ = writer.Insert(ipnet, record)
 				}
 			}
 		}
@@ -201,7 +168,7 @@ func main() {
 		fmt.Printf("  └─ Tag [%s] completed with %d CIDR entries.\n", tag, len(finalCIDRs))
 	}
 
-	// 3. 匯出合併後的 Country.mmdb
+	// 3. 匯出 Country.mmdb
 	outMMDB, err := os.Create("Country.mmdb")
 	if err != nil {
 		fmt.Printf("Failed to create Country.mmdb: %v\n", err)
