@@ -1,23 +1,38 @@
 {
   "base_mmdb_url": "https://github.com/daijro/geoip-all-in-one/releases/latest/download/geoip-aio-all.mmdb",
+
+  "_sample_comment": {
+    "### GeoIP 示範樣板範例 ###": "==================================================",
+    "_usage_notes": [
+      "1. base_mmdb_url: 基底 .mmdb 下載網址",
+      "2. categories: 追加或覆蓋自訂的 IP 分類"
+    ]
+  },
+
   "categories": {
     "lan": {
-      "_comment": "Client 端使用 ext:geoip.dat:lan 引用",
       "urls": [
-        "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/refs/heads/master/rule/Clash/Lan/Lan.yaml"
-      ]
+        "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Lan/Lan.yaml"
+      ],
+      "local_files": [],
+      "inline_rules": [],
+      "exclude_rules": []
     },
     "apple": {
-      "_comment": "Client 端使用 ext:geoip.dat:apple 引用",
       "urls": [
         "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/refs/heads/master/rule/Clash/Apple/Apple.yaml"
-      ]
+      ],
+      "local_files": [],
+      "inline_rules": [],
+      "exclude_rules": []
     },
-    "google": {
-      "_comment": "Client 端使用 ext:geoip.dat:google 引用",
+     "google": {
       "urls": [
         "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/refs/heads/master/rule/Clash/Google/Google.yaml"
-      ]
+      ],
+      "local_files": [],
+      "inline_rules": [],
+      "exclude_rules": []
     }
   }
 }
