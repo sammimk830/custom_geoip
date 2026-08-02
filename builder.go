@@ -60,14 +60,10 @@ func main() {
 		}
 		defer reader.Close()
 
-		// 關鍵修復：定義遇到衝突/Aliased 網絡時的順利覆蓋策略 (Replace)
-		replaceInserter := func(key mmdbtype.DataType, newBitValue, oldBitValue mmdbtype.DataType) (mmdbtype.DataType, error) {
-			return newBitValue, nil
-		}
-
+		// 關鍵修正：使用標準的 inserter.Replace 策略，完美解決重疊網段與 Aliased Network
 		writer, err = mmdbwriter.Load(baseFile, mmdbwriter.Options{
 			RecordSize: 24,
-			Inserter:   replaceInserter,
+			Inserter:   inserter.Replace,
 		})
 		if err != nil {
 			fmt.Printf("Failed to load base MMDB into writer: %v\n", err)
