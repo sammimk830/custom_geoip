@@ -44,12 +44,14 @@
 
   "ruleset_outputs": {
     "srs": [
+      "cn",
       "hgc",
       "mylan",
       "myapple",
       "mygoogle"
     ],
     "mrs": [
+      "cn",
       "hgc",
       "mylan",
       "myapple",
