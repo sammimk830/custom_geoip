@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	"github.com/maxmind/mmdbwriter"
-	"github.com/maxmind/mmdbwriter/inserter"
 	"github.com/maxmind/mmdbwriter/mmdbtype"
 	"github.com/oschwald/maxminddb-golang"
 )
@@ -67,7 +66,7 @@ func main() {
 		})
 		if err != nil {
 			fmt.Printf("Warning: Direct mmdbwriter.Load failed (%v). Creating fresh Tree and copying records...\n", err)
-			
+
 			// 建一個新的 Tree
 			writer, err = mmdbwriter.New(mmdbwriter.Options{
 				DatabaseType: "GeoIP2-Country",
@@ -101,8 +100,8 @@ func main() {
 							"iso_code": mmdbtype.String(isoCode),
 						},
 					}
-					// 官方標準寫法: InsertFunc 接收 3 個參數: (subnet, inserter.Func, record)
-					_ = writer.InsertFunc(subnet, inserter.OldRecord, mmdbRecord)
+					// 官方標準 2 參數寫法：writer.Insert(subnet, record)
+					_ = writer.Insert(subnet, mmdbRecord)
 				}
 			}
 		}
@@ -175,7 +174,7 @@ func main() {
 			}
 		}
 
-		// 執行剔除與寫入 (使用官方真實導出的 inserter.OldRecord 進行覆蓋)
+		// 執行剔除與寫入 (使用官方標準 2 參數 writer.Insert)
 		var finalCIDRs []string
 		for cidr := range ruleMap {
 			if !excludeMap[cidr] {
@@ -188,8 +187,8 @@ func main() {
 							"iso_code": mmdbtype.String(strings.ToUpper(tag)),
 						},
 					}
-					// 3 個參數：(ipnet, inserterFunc, record)
-					err := writer.InsertFunc(ipnet, inserter.OldRecord, record)
+					// 官方 2 參數寫法：writer.Insert(ipnet, record)
+					err := writer.Insert(ipnet, record)
 					if err != nil {
 						fmt.Printf("Warning: Skipping insert for %s: %v\n", cidr, err)
 					}
