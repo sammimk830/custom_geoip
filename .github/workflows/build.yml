@@ -5,15 +5,23 @@ on:
     branches:
       - main
       - master
+
   schedule:
-    - cron: '0 20 * * *'  # 每天香港時間 04:00 自動更新
+    - cron: "0 20 * * *" # 每日香港時間 04:00
+
   workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-custom-geoip
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v4
@@ -21,125 +29,212 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: "3.x"
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
-          go-version: '1.22'
+          go-version: "stable"
           cache: false
 
       - name: Get current timestamp (HKT)
         id: time
+        shell: bash
         run: |
-          echo "TIMESTAMP=$(TZ='Asia/Hong_Kong' date +'%Y%m%d%H%M%S')" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          echo "TIMESTAMP=$(TZ='Asia/Hong_Kong' date +'%Y%m%d%H%M%S')" >> "$GITHUB_OUTPUT"
 
-      - name: Process & Extract IP Rules (Python)
-        run: python convert.py
-
-      - name: Compile and Merge with Base MMDB using v2fly Tool
+      - name: Process and Extract IP Rules
+        shell: bash
         run: |
+          set -euo pipefail
+
+          python convert.py
+
+          echo "Generated files:"
+          find data -maxdepth 1 -type f -print || true
+
+          if [ ! -d "data" ]; then
+            echo "Error: convert.py did not create the data directory."
+            exit 1
+          fi
+
+          if [ -z "$(find data -maxdepth 1 -type f -print -quit)" ]; then
+            echo "Error: no IP rule files were generated inside data."
+            exit 1
+          fi
+
+      - name: Clone v2fly geoip compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf compiler
           git clone --depth 1 https://github.com/v2fly/geoip.git compiler
-          
-          # 將自訂 data/ 資料夾複製到編譯器目錄
-          cp -r data compiler/
-          
-          cd compiler
-          
-          # 如果存在 base.mmdb，則將其作為 maxminddb 輸入，並覆蓋疊加 data/ 目錄下的自訂 IP
-          if [ -f "../base.mmdb" ]; then
-            cp ../base.mmdb ./base.mmdb
-            cat << 'EOF' > config.json
-{
-  "input": [
-    {
-      "type": "maxminddb",
-      "action": "add",
-      "args": {
-        "uri": "./base.mmdb"
-      }
-    },
-    {
-      "type": "v2rayCustom",
-      "action": "add",
-      "args": {
-        "dir": "./data"
-      }
-    }
-  ],
-  "output": [
-    {
-      "type": "v2rayGeoIPDat",
-      "action": "output",
-      "args": {
-        "outputName": "geoip.dat",
-        "outputDir": "./output"
-      }
-    }
-  ]
-}
-EOF
+
+          echo "Compiler commit:"
+          git -C compiler rev-parse HEAD
+
+      - name: Copy source files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf compiler/data
+          cp -r data compiler/data
+
+          if [ -f "base.mmdb" ]; then
+            cp base.mmdb compiler/base.mmdb
+            echo "base.mmdb found and copied."
           else
-            cat << 'EOF' > config.json
-{
-  "input": [
-    {
-      "type": "v2rayCustom",
-      "action": "add",
-      "args": {
-        "dir": "./data"
-      }
-    }
-  ],
-  "output": [
-    {
-      "type": "v2rayGeoIPDat",
-      "action": "output",
-      "args": {
-        "outputName": "geoip.dat",
-        "outputDir": "./output"
-      }
-    }
-  ]
-}
-EOF
-          fi
-          
-          # 執行官方編譯器 (讀取自動生成的 config.json)
-          go run ./
-          
-          if [ -f "output/geoip.dat" ]; then
-            mv output/geoip.dat ../geoip.dat
-            sha256sum ../geoip.dat | awk '{print $1}' > ../geoip.dat.sha256sum
+            echo "base.mmdb not found. Only custom data will be compiled."
           fi
 
-      # 1. 建立獨立時間戳記 Release (例如 Tag: 20260802161231)
-      - name: Release geoip.dat (Timestamp)
+          echo "Compiler input files:"
+          find compiler/data -maxdepth 1 -type f -print
+
+      - name: Create v2fly compiler config
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f "compiler/base.mmdb" ]; then
+            cat > compiler/custom-config.json <<'EOF'
+          {
+            "input": [
+              {
+                "type": "maxmindMMDB",
+                "action": "add",
+                "args": {
+                  "uri": "./base.mmdb"
+                }
+              },
+              {
+                "type": "text",
+                "action": "add",
+                "args": {
+                  "inputDir": "./data"
+                }
+              }
+            ],
+            "output": [
+              {
+                "type": "v2rayGeoIPDat",
+                "action": "output",
+                "args": {
+                  "outputDir": "./output",
+                  "outputName": "geoip.dat"
+                }
+              }
+            ]
+          }
+          EOF
+          else
+            cat > compiler/custom-config.json <<'EOF'
+          {
+            "input": [
+              {
+                "type": "text",
+                "action": "add",
+                "args": {
+                  "inputDir": "./data"
+                }
+              }
+            ],
+            "output": [
+              {
+                "type": "v2rayGeoIPDat",
+                "action": "output",
+                "args": {
+                  "outputDir": "./output",
+                  "outputName": "geoip.dat"
+                }
+              }
+            ]
+          }
+          EOF
+          fi
+
+          echo "Compiler config:"
+          cat compiler/custom-config.json
+
+      - name: Compile and merge geoip.dat
+        working-directory: compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf output
+          mkdir -p output
+
+          go mod download
+          go run ./ -c custom-config.json
+
+          if [ ! -f "output/geoip.dat" ]; then
+            echo "Error: output/geoip.dat was not generated."
+            find . -maxdepth 3 -type f -print
+            exit 1
+          fi
+
+          if [ ! -s "output/geoip.dat" ]; then
+            echo "Error: output/geoip.dat is empty."
+            exit 1
+          fi
+
+          mv output/geoip.dat ../geoip.dat
+
+      - name: Verify geoip.dat
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ ! -f "geoip.dat" ]; then
+            echo "Error: geoip.dat does not exist."
+            exit 1
+          fi
+
+          if [ ! -s "geoip.dat" ]; then
+            echo "Error: geoip.dat is empty."
+            exit 1
+          fi
+
+          echo "Generated geoip.dat:"
+          ls -lh geoip.dat
+
+          sha256sum geoip.dat | tee geoip.dat.sha256sum
+
+      # 1. 建立獨立年月日時分秒 Release (歷史備份)
+      - name: Release geoip.dat with timestamp
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.time.outputs.TIMESTAMP }}
-          name: "${{ steps.time.outputs.TIMESTAMP }}"
-          body: "Auto-built geoip.dat at ${{ steps.time.outputs.TIMESTAMP }}"
+          name: ${{ steps.time.outputs.TIMESTAMP }}
+          body: |
+            Auto-built custom geoip.dat.
+
+            Build time: ${{ steps.time.outputs.TIMESTAMP }} HKT
           draft: false
           prerelease: false
+          make_latest: false
           files: |
             geoip.dat
             geoip.dat.sha256sum
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # 2. 同時更新固定 Latest Tag (release)
-      - name: Update Latest Tag
+      # 2. 更新固定 Latest Release 標籤 (供客戶端固定 URL 訂閱)
+      - name: Update fixed release tag
         uses: softprops/action-gh-release@v2
         with:
           tag_name: release
-          name: "Latest Release"
+          name: Latest Release
           body: |
             Always contains the latest custom geoip.dat.
-            
+
             Build time: ${{ steps.time.outputs.TIMESTAMP }} HKT
           draft: false
           prerelease: false
+          make_latest: true
           files: |
             geoip.dat
             geoip.dat.sha256sum
