@@ -5,6 +5,8 @@
     "https://github.com/xishang0128/meta-rules-dat/releases/download/latest/GeoLite2-ASN.mmdb"
   ],
 
+  "asn_groups": { "hgc": [ 9304 ] },
+
   "_sample_comment": {
     "### GeoIP 示範樣板範例 ###": "==================================================",
     "_usage_notes": [
