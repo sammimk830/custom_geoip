@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/maxmind/mmdbwriter"
+	"github.com/maxmind/mmdbwriter/inserter"
 	"github.com/maxmind/mmdbwriter/mmdbtype"
 	"github.com/oschwald/maxminddb-golang"
 )
@@ -59,10 +60,10 @@ func main() {
 		}
 		defer reader.Close()
 
-		// 設定允許處理重疊與 Aliased Network 的策略
+		// 使用 inserter.ReplaceWithCloser 解決 2001::/32 等 Aliased Network 重疊問題
 		writer, err = mmdbwriter.Load(baseFile, mmdbwriter.Options{
-			RecordSize:     24,
-			InsertStrategy: mmdbwriter.ReplaceWithCloser,
+			RecordSize: 24,
+			Inserter:   inserter.ReplaceWithCloser,
 		})
 		if err != nil {
 			fmt.Printf("Failed to load base MMDB into writer: %v\n", err)
@@ -151,8 +152,8 @@ func main() {
 							"iso_code": mmdbtype.String(strings.ToUpper(tag)),
 						},
 					}
-					// 捕捉單條網段插入異常，確保不會卡死
-					if err := writer.Insert(ipnet, record); err != nil {
+					// 採用 ReplaceWithCloser 覆蓋插入
+					if err := writer.InsertFunc(ipnet, inserter.ReplaceWithCloser, record); err != nil {
 						fmt.Printf("Warning: Skipping insert for %s: %v\n", cidr, err)
 					}
 				}
