@@ -1,5 +1,8 @@
 {
-  "base_mmdb_url": "https://github.com/daijro/geoip-all-in-one/releases/latest/download/geoip-aio-all.mmdb",
+  "base_mmdb_urls": [
+    "https://github.com/daijro/geoip-all-in-one/releases/latest/download/geoip-aio-all.mmdb",
+    "https://github.com/xishang0128/meta-rules-dat/releases/download/latest/GeoLite2-ASN.mmdb"
+  ],
 
   "_sample_comment": {
     "### GeoIP 示範樣板範例 ###": "==================================================",
