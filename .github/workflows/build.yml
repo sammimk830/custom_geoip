@@ -534,7 +534,7 @@ jobs:
                   )
 
                   rules.append(
-                      f"{rule_type},{network},no-resolve"
+                      f"{rule_type},{network}"
                   )
 
               output_file = surge_source_dir / f"{tag}.list"
