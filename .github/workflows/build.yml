@@ -936,6 +936,76 @@ jobs:
       # Release
       # ============================================================
 
+      - name: Publish generated files to release branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf publish
+
+          git fetch origin \
+            refs/heads/release:refs/remotes/origin/release
+
+          git worktree add \
+            --detach \
+            publish \
+            refs/remotes/origin/release
+
+          find publish \
+            -mindepth 1 \
+            -maxdepth 1 \
+            ! -name '.git' \
+            -exec rm -rf {} +
+
+          mkdir -p publish/srs
+          mkdir -p publish/mrs
+          mkdir -p publish/surge
+
+          cp geoip.dat publish/
+          cp geoip.dat.sha256sum publish/
+          cp rulesets.sha256sum publish/
+
+          if [ -d srs ]; then
+            find srs \
+              -maxdepth 1 \
+              -type f \
+              -name '*.srs' \
+              -exec cp {} publish/srs/ \;
+          fi
+
+          if [ -d mrs ]; then
+            find mrs \
+              -maxdepth 1 \
+              -type f \
+              -name '*.mrs' \
+              -exec cp {} publish/mrs/ \;
+          fi
+
+          if [ -d surge ]; then
+            find surge \
+              -maxdepth 1 \
+              -type f \
+              -name '*.list' \
+              -exec cp {} publish/surge/ \;
+          fi
+
+          cd publish
+
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "Release branch already contains the latest files."
+          else
+            git commit \
+              -m "Update generated rules ${{ steps.time.outputs.TIMESTAMP }}"
+
+            git push origin HEAD:refs/heads/release
+          fi
+
       - name: Release files with timestamp
         uses: softprops/action-gh-release@v2
         with:
