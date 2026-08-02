@@ -60,10 +60,14 @@ func main() {
 		}
 		defer reader.Close()
 
-		// 關鍵修復：inserter.TopLevelPropertyWithCloser() 是一個函數，需要帶上 () 呼叫
+		// 關鍵修復：定義遇到衝突/Aliased 網絡時的順利覆蓋策略 (Replace)
+		replaceInserter := func(key mmdbtype.DataType, newBitValue, oldBitValue mmdbtype.DataType) (mmdbtype.DataType, error) {
+			return newBitValue, nil
+		}
+
 		writer, err = mmdbwriter.Load(baseFile, mmdbwriter.Options{
 			RecordSize: 24,
-			Inserter:   inserter.TopLevelPropertyWithCloser(),
+			Inserter:   replaceInserter,
 		})
 		if err != nil {
 			fmt.Printf("Failed to load base MMDB into writer: %v\n", err)
