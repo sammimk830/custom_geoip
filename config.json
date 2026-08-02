@@ -40,5 +40,20 @@
       "inline_rules": [],
       "exclude_rules": []
     }
+  },
+
+  "ruleset_outputs": {
+    "srs": [
+      "hgc",
+      "mylan",
+      "myapple",
+      "mygoogle"
+    ],
+    "mrs": [
+      "hgc",
+      "mylan",
+      "myapple",
+      "mygoogle"
+    ]
   }
 }
