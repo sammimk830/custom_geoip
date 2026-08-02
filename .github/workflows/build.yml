@@ -79,82 +79,95 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
+      
           rm -rf compiler/data
+          rm -rf compiler/mmdb
+      
           cp -r data compiler/data
-
-          if [ -f "base.mmdb" ]; then
-            cp base.mmdb compiler/base.mmdb
-            echo "base.mmdb found and copied."
-          else
-            echo "base.mmdb not found. Only custom data will be compiled."
-          fi
-
+          mkdir -p compiler/mmdb
+      
+          MMDB_COUNT=0
+      
+          for mmdb_file in base-*.mmdb; do
+            if [ ! -f "$mmdb_file" ]; then
+              continue
+            fi
+      
+            cp "$mmdb_file" "compiler/mmdb/"
+            MMDB_COUNT=$((MMDB_COUNT + 1))
+            echo "Copied $mmdb_file"
+          done
+      
+          echo "Total MMDB files copied: $MMDB_COUNT"
+      
           echo "Compiler input files:"
-          find compiler/data -maxdepth 1 -type f -print
+          find compiler/data compiler/mmdb -maxdepth 1 -type f -print
 
       - name: Create v2fly compiler config
         shell: bash
         run: |
           set -euo pipefail
-
-          if [ -f "compiler/base.mmdb" ]; then
-            cat > compiler/custom-config.json <<'EOF'
-          {
-            "input": [
-              {
-                "type": "maxmindMMDB",
-                "action": "add",
-                "args": {
-                  "uri": "./base.mmdb"
-                }
-              },
-              {
-                "type": "text",
-                "action": "add",
-                "args": {
+      
+          python <<'PY'
+          import glob
+          import json
+          import os
+      
+          inputs = []
+      
+          mmdb_files = sorted(glob.glob("compiler/mmdb/base-*.mmdb"))
+      
+          for mmdb_file in mmdb_files:
+              relative_path = "./" + os.path.relpath(
+                  mmdb_file,
+                  start="compiler"
+              ).replace("\\", "/")
+      
+              inputs.append({
+                  "type": "maxmindMMDB",
+                  "action": "add",
+                  "args": {
+                      "uri": relative_path
+                  }
+              })
+      
+          inputs.append({
+              "type": "text",
+              "action": "add",
+              "args": {
                   "inputDir": "./data"
-                }
               }
-            ],
-            "output": [
-              {
-                "type": "v2rayGeoIPDat",
-                "action": "output",
-                "args": {
-                  "outputDir": "./output",
-                  "outputName": "geoip.dat"
-                }
-              }
-            ]
+          })
+      
+          compiler_config = {
+              "input": inputs,
+              "output": [
+                  {
+                      "type": "v2rayGeoIPDat",
+                      "action": "output",
+                      "args": {
+                          "outputDir": "./output",
+                          "outputName": "geoip.dat"
+                      }
+                  }
+              ]
           }
-          EOF
-          else
-            cat > compiler/custom-config.json <<'EOF'
-          {
-            "input": [
-              {
-                "type": "text",
-                "action": "add",
-                "args": {
-                  "inputDir": "./data"
-                }
-              }
-            ],
-            "output": [
-              {
-                "type": "v2rayGeoIPDat",
-                "action": "output",
-                "args": {
-                  "outputDir": "./output",
-                  "outputName": "geoip.dat"
-                }
-              }
-            ]
-          }
-          EOF
-          fi
-
+      
+          with open(
+              "compiler/custom-config.json",
+              "w",
+              encoding="utf-8"
+          ) as config_file:
+              json.dump(
+                  compiler_config,
+                  config_file,
+                  ensure_ascii=False,
+                  indent=2
+              )
+      
+          print(f"Added {len(mmdb_files)} MMDB files.")
+          PY
+      
           echo "Compiler config:"
           cat compiler/custom-config.json
 
