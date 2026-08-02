@@ -60,10 +60,10 @@ func main() {
 		}
 		defer reader.Close()
 
-		// 使用 inserter.TopLevelPropertyWithCloser 合併處理 base MMDB 內的重疊網絡
+		// 關鍵修復：inserter.TopLevelPropertyWithCloser() 是一個函數，需要帶上 () 呼叫
 		writer, err = mmdbwriter.Load(baseFile, mmdbwriter.Options{
 			RecordSize: 24,
-			Inserter:   inserter.TopLevelPropertyWithCloser,
+			Inserter:   inserter.TopLevelPropertyWithCloser(),
 		})
 		if err != nil {
 			fmt.Printf("Failed to load base MMDB into writer: %v\n", err)
@@ -152,7 +152,6 @@ func main() {
 							"iso_code": mmdbtype.String(strings.ToUpper(tag)),
 						},
 					}
-					// 使用已配置好的預設 Insert (會自動套用初始化時的 inserter 策略)
 					if err := writer.Insert(ipnet, record); err != nil {
 						fmt.Printf("Warning: Skipping insert for %s: %v\n", cidr, err)
 					}
