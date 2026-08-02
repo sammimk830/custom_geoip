@@ -1,6 +1,7 @@
 {
-  "base_mmdb_urls": [
-    "https://github.com/daijro/geoip-all-in-one/releases/latest/download/geoip-aio-all.mmdb",
+  "base_mmdb_url": "https://github.com/daijro/geoip-all-in-one/releases/latest/download/geoip-aio-all.mmdb",
+
+  "asn_mmdb_urls": [
     "https://github.com/xishang0128/meta-rules-dat/releases/download/latest/GeoLite2-ASN.mmdb"
   ],
 
