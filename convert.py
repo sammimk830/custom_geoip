@@ -1,6 +1,6 @@
+```python
 import ipaddress
 import json
-import os
 import re
 import shutil
 import urllib.request
@@ -14,11 +14,10 @@ CONFIG_FILE = Path("config.json")
 DATA_DIR = Path("data")
 
 DOWNLOAD_TIMEOUT = 180
-USER_AGENT = "Mozilla/5.0 custom_geoip_builder/1.0"
+USER_AGENT = "Mozilla/5.0 custom_geoip_builder/1.1"
 
 
 def download_file(url: str, output_path: Path) -> None:
-    """下載檔案，失敗時直接終止 build。"""
     print(f"[Download] {url}")
 
     request = urllib.request.Request(
@@ -49,7 +48,6 @@ def download_file(url: str, output_path: Path) -> None:
 
 
 def fetch_text(url: str) -> list[str]:
-    """下載文字規則。"""
     print(f"  ├─ 下載規則：{url}")
 
     request = urllib.request.Request(
@@ -75,7 +73,6 @@ def fetch_text(url: str) -> list[str]:
 
 
 def normalize_cidr(value: str) -> str | None:
-    """將 IP 或 CIDR 正規化。"""
     value = value.strip()
 
     if not value:
@@ -87,24 +84,17 @@ def normalize_cidr(value: str) -> str | None:
             prefix = 32 if address.version == 4 else 128
             return f"{address}/{prefix}"
 
-        network = ipaddress.ip_network(
-            value,
-            strict=False,
+        return str(
+            ipaddress.ip_network(
+                value,
+                strict=False,
+            )
         )
-        return str(network)
-
     except ValueError:
         return None
 
 
 def parse_rule_line(line: str) -> str | None:
-    """
-    支援：
-    IP-CIDR,1.2.3.0/24
-    IP-CIDR6,2001:db8::/32
-    - IP-CIDR,1.2.3.0/24,no-resolve
-    1.2.3.0/24
-    """
     line = line.strip()
 
     if not line:
@@ -123,7 +113,6 @@ def parse_rule_line(line: str) -> str | None:
     line = line.lstrip("- ").strip()
     line = line.strip("'\"")
 
-    # 移除行尾註解
     if " #" in line:
         line = line.split(" #", 1)[0].strip()
 
@@ -139,20 +128,20 @@ def parse_rule_line(line: str) -> str | None:
         }:
             return normalize_cidr(parts[1])
 
-        # 忽略 Domain、GeoSite 等非 IP 規則
         return None
 
     return normalize_cidr(line)
 
 
 def read_local_rules(file_path: str) -> list[str]:
-    """讀取本機規則檔。"""
     path = Path(file_path)
 
     print(f"  ├─ 讀取本機規則：{path}")
 
     if not path.exists():
-        raise FileNotFoundError(f"找不到本機規則檔：{path}")
+        raise FileNotFoundError(
+            f"找不到本機規則檔：{path}"
+        )
 
     return path.read_text(
         encoding="utf-8",
@@ -173,7 +162,6 @@ def parse_rules(lines: list[str]) -> set[str]:
 
 
 def get_asn(record: Any) -> int | None:
-    """由 GeoLite2 ASN record 取出 ASN number。"""
     if not isinstance(record, dict):
         return None
 
@@ -191,60 +179,166 @@ def get_asn(record: Any) -> int | None:
     return None
 
 
-def extract_asn_mmdb(
+def normalize_asn_groups(
+    config: dict[str, Any],
+) -> dict[str, set[int]]:
+    raw_groups = config.get("asn_groups", {})
+
+    if raw_groups is None:
+        return {}
+
+    if not isinstance(raw_groups, dict):
+        raise TypeError(
+            "asn_groups 必須係 JSON object"
+        )
+
+    normalized: dict[str, set[int]] = {}
+
+    for group_name, values in raw_groups.items():
+        if not isinstance(group_name, str):
+            raise TypeError(
+                "asn_groups 嘅 group 名稱必須係字串"
+            )
+
+        safe_name = re.sub(
+            r"[^a-zA-Z0-9_-]",
+            "_",
+            group_name.strip(),
+        ).lower()
+
+        if not safe_name:
+            raise ValueError(
+                "asn_groups 包含空白 group 名稱"
+            )
+
+        if not isinstance(values, list):
+            raise TypeError(
+                f"asn_groups.{group_name} 必須係陣列"
+            )
+
+        asn_numbers: set[int] = set()
+
+        for value in values:
+            if isinstance(value, str):
+                value = value.strip().upper()
+
+                if value.startswith("AS"):
+                    value = value[2:]
+
+                if not value.isdigit():
+                    raise ValueError(
+                        f"{group_name} 包含無效 ASN：{value}"
+                    )
+
+                number = int(value)
+
+            elif isinstance(value, int):
+                number = value
+
+            else:
+                raise TypeError(
+                    f"{group_name} 包含無效 ASN 類型："
+                    f"{type(value).__name__}"
+                )
+
+            if number <= 0:
+                raise ValueError(
+                    f"{group_name} 包含無效 ASN：{number}"
+                )
+
+            asn_numbers.add(number)
+
+        if not asn_numbers:
+            print(
+                f"[ASN Group] {safe_name} 無 ASN，已跳過"
+            )
+            continue
+
+        normalized[safe_name] = asn_numbers
+
+    return normalized
+
+
+def extract_selected_asn_mmdb(
     mmdb_path: Path,
+    asn_groups: dict[str, set[int]],
     output_data: dict[str, set[str]],
 ) -> None:
-    """
-    將 ASN MMDB 拆成：
-    data/as13335
-    data/as15169
-    data/as4515
-    """
     print(f"[ASN MMDB] 處理：{mmdb_path}")
 
-    valid_count = 0
-    skipped_count = 0
-    discovered_asns: set[int] = set()
+    if not asn_groups:
+        print("  └─ 無設定 asn_groups，跳過 ASN 提取")
+        return
+
+    asn_to_groups: dict[int, set[str]] = {}
+
+    for group_name, asn_numbers in asn_groups.items():
+        for asn in asn_numbers:
+            asn_to_groups.setdefault(
+                asn,
+                set(),
+            ).add(group_name)
+
+    wanted_asns = set(asn_to_groups)
+    found_asns: set[int] = set()
+    matched_cidrs = 0
 
     try:
-        with maxminddb.open_database(str(mmdb_path)) as reader:
+        with maxminddb.open_database(
+            str(mmdb_path)
+        ) as reader:
             for network, record in reader:
                 asn = get_asn(record)
 
-                if asn is None:
-                    skipped_count += 1
+                if asn is None or asn not in wanted_asns:
                     continue
 
-                tag = f"as{asn}"
+                found_asns.add(asn)
+                cidr = str(network)
 
-                output_data.setdefault(tag, set()).add(
-                    str(network)
-                )
+                for group_name in asn_to_groups[asn]:
+                    output_data.setdefault(
+                        group_name,
+                        set(),
+                    ).add(cidr)
 
-                discovered_asns.add(asn)
-                valid_count += 1
+                matched_cidrs += 1
 
     except Exception as exc:
         raise RuntimeError(
-            f"無法讀取 ASN MMDB：{mmdb_path}\n原因：{exc}"
+            f"無法讀取 ASN MMDB：{mmdb_path}\n"
+            f"原因：{exc}"
         ) from exc
 
-    if valid_count == 0:
-        raise RuntimeError(
-            f"ASN MMDB 無法產生任何規則：{mmdb_path}"
+    print(f"  ├─ 指定 ASN：{len(wanted_asns):,}")
+    print(f"  ├─ 搵到 ASN：{len(found_asns):,}")
+    print(f"  └─ 匹配 CIDR：{matched_cidrs:,}")
+
+    missing_asns = sorted(wanted_asns - found_asns)
+
+    if missing_asns:
+        missing_text = ", ".join(
+            f"AS{asn}" for asn in missing_asns
         )
 
-    print(f"  ├─ ASN 數量：{len(discovered_asns):,}")
-    print(f"  ├─ 有效 CIDR：{valid_count:,}")
-    print(f"  └─ 跳過記錄：{skipped_count:,}")
+        print(
+            f"  警告：以下 ASN 喺 MMDB 搵唔到："
+            f"{missing_text}"
+        )
+
+    for group_name in sorted(asn_groups):
+        count = len(output_data.get(group_name, set()))
+
+        print(
+            f"  ├─ Group {group_name}："
+            f"{count:,} 條 CIDR"
+        )
 
 
 def write_rule_files(
     output_data: dict[str, set[str]],
 ) -> None:
-    """輸出 v2fly text input 規則檔。"""
-    print("[Output] 輸出自訂及 ASN 規則")
+    print("[Output] 輸出規則")
 
     for tag in sorted(output_data):
         rules = output_data[tag]
@@ -253,7 +347,6 @@ def write_rule_files(
             print(f"  ├─ {tag}：無規則，已跳過")
             continue
 
-        # 防止分類名稱包含路徑或特殊符號
         safe_tag = re.sub(
             r"[^a-zA-Z0-9_-]",
             "_",
@@ -266,7 +359,11 @@ def write_rule_files(
             rules,
             key=lambda item: (
                 ipaddress.ip_network(item).version,
-                int(ipaddress.ip_network(item).network_address),
+                int(
+                    ipaddress.ip_network(
+                        item
+                    ).network_address
+                ),
                 ipaddress.ip_network(item).prefixlen,
             ),
         )
@@ -287,24 +384,28 @@ def load_url_list(
     plural_key: str,
     legacy_key: str | None = None,
 ) -> list[str]:
-    """同時支援 array 同舊版單一 URL。"""
     value = config.get(plural_key, [])
 
     if isinstance(value, str):
-        urls = [value]
+        urls = [value.strip()] if value.strip() else []
+
     elif isinstance(value, list):
         urls = [
-            str(item)
+            str(item).strip()
             for item in value
             if str(item).strip()
         ]
+
     else:
         raise TypeError(
             f"{plural_key} 必須係字串或者陣列"
         )
 
     if not urls and legacy_key:
-        legacy_value = config.get(legacy_key, "")
+        legacy_value = config.get(
+            legacy_key,
+            "",
+        )
 
         if isinstance(legacy_value, str):
             legacy_value = legacy_value.strip()
@@ -323,7 +424,9 @@ def process_categories(
     categories = config.get("categories", {})
 
     if not isinstance(categories, dict):
-        raise TypeError("categories 必須係 JSON object")
+        raise TypeError(
+            "categories 必須係 JSON object"
+        )
 
     for category_name, settings in categories.items():
         if category_name.startswith("_"):
@@ -339,39 +442,44 @@ def process_categories(
         rules: set[str] = set()
 
         urls = settings.get("urls", [])
-        local_files = settings.get("local_files", [])
-        inline_rules = settings.get("inline_rules", [])
-        exclude_rules = settings.get("exclude_rules", [])
+        local_files = settings.get(
+            "local_files",
+            [],
+        )
+        inline_rules = settings.get(
+            "inline_rules",
+            [],
+        )
+        exclude_rules = settings.get(
+            "exclude_rules",
+            [],
+        )
 
-        if not isinstance(urls, list):
-            raise TypeError(
-                f"{category_name}.urls 必須係陣列"
-            )
-
-        if not isinstance(local_files, list):
-            raise TypeError(
-                f"{category_name}.local_files 必須係陣列"
-            )
-
-        if not isinstance(inline_rules, list):
-            raise TypeError(
-                f"{category_name}.inline_rules 必須係陣列"
-            )
-
-        if not isinstance(exclude_rules, list):
-            raise TypeError(
-                f"{category_name}.exclude_rules 必須係陣列"
-            )
+        for field_name, field_value in {
+            "urls": urls,
+            "local_files": local_files,
+            "inline_rules": inline_rules,
+            "exclude_rules": exclude_rules,
+        }.items():
+            if not isinstance(field_value, list):
+                raise TypeError(
+                    f"{category_name}.{field_name} "
+                    "必須係陣列"
+                )
 
         for url in urls:
             rules.update(
-                parse_rules(fetch_text(str(url)))
+                parse_rules(
+                    fetch_text(str(url))
+                )
             )
 
         for file_path in local_files:
             rules.update(
                 parse_rules(
-                    read_local_rules(str(file_path))
+                    read_local_rules(
+                        str(file_path)
+                    )
                 )
             )
 
@@ -400,14 +508,19 @@ def process_categories(
 
         output_data[category_name] = rules
 
-        print(f"  └─ 有效規則：{len(rules):,} 條")
+        print(
+            f"  └─ 有效規則："
+            f"{len(rules):,} 條"
+        )
 
     return output_data
 
 
 def main() -> None:
     if not CONFIG_FILE.exists():
-        raise FileNotFoundError("找不到 config.json")
+        raise FileNotFoundError(
+            "找不到 config.json"
+        )
 
     with CONFIG_FILE.open(
         "r",
@@ -415,19 +528,21 @@ def main() -> None:
     ) as config_file:
         config = json.load(config_file)
 
-    # 每次重新建立，避免舊 ASN / 自訂分類殘留
     if DATA_DIR.exists():
         shutil.rmtree(DATA_DIR)
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    DATA_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-    # 移除上一次可能殘留嘅 Country MMDB
-    for old_mmdb in Path(".").glob("base-*.mmdb"):
+    for old_mmdb in Path(".").glob(
+        "base-*.mmdb"
+    ):
         old_mmdb.unlink()
 
     output_data = process_categories(config)
 
-    # Country MMDB：保留原檔，交俾 v2fly maxmindMMDB
     country_mmdb_urls = load_url_list(
         config,
         plural_key="base_mmdb_urls",
@@ -443,38 +558,75 @@ def main() -> None:
         country_mmdb_urls,
         start=1,
     ):
-        output_path = Path(f"base-{index}.mmdb")
-        download_file(url, output_path)
+        output_path = Path(
+            f"base-{index}.mmdb"
+        )
 
-    # ASN MMDB：拆成 data/asXXXX
+        download_file(
+            url,
+            output_path,
+        )
+
+    asn_groups = normalize_asn_groups(config)
+
     asn_mmdb_urls = load_url_list(
         config,
         plural_key="asn_mmdb_urls",
     )
 
-    print(f"[ASN MMDB] 數量：{len(asn_mmdb_urls)}")
+    print(
+        f"[ASN MMDB] 數量："
+        f"{len(asn_mmdb_urls)}"
+    )
+    print(
+        f"[ASN Groups] 數量："
+        f"{len(asn_groups)}"
+    )
 
-    for index, url in enumerate(
-        asn_mmdb_urls,
-        start=1,
-    ):
-        temporary_path = Path(
-            f"asn-{index}.mmdb"
+    if asn_groups and not asn_mmdb_urls:
+        raise RuntimeError(
+            "已設定 asn_groups，"
+            "但 asn_mmdb_urls 為空"
         )
 
-        download_file(url, temporary_path)
+    if asn_mmdb_urls and not asn_groups:
+        print(
+            "[ASN MMDB] 無設定 asn_groups，"
+            "不會下載或輸出 ASN 規則"
+        )
 
-        try:
-            extract_asn_mmdb(
-                temporary_path,
-                output_data,
+    if asn_groups:
+        for index, url in enumerate(
+            asn_mmdb_urls,
+            start=1,
+        ):
+            temporary_path = Path(
+                f"asn-{index}.mmdb"
             )
-        finally:
-            temporary_path.unlink(missing_ok=True)
+
+            download_file(
+                url,
+                temporary_path,
+            )
+
+            try:
+                extract_selected_asn_mmdb(
+                    temporary_path,
+                    asn_groups,
+                    output_data,
+                )
+            finally:
+                temporary_path.unlink(
+                    missing_ok=True
+                )
 
     write_rule_files(output_data)
 
-    generated_files = list(DATA_DIR.glob("*"))
+    generated_files = [
+        path
+        for path in DATA_DIR.glob("*")
+        if path.is_file()
+    ]
 
     if not generated_files:
         raise RuntimeError(
@@ -483,10 +635,24 @@ def main() -> None:
 
     print()
     print("所有規則處理完成。")
-    print(f"Country MMDB：{len(country_mmdb_urls)} 個")
-    print(f"ASN MMDB：{len(asn_mmdb_urls)} 個")
-    print(f"Text tags：{len(generated_files)} 個")
+    print(
+        f"Country MMDB："
+        f"{len(country_mmdb_urls)} 個"
+    )
+    print(
+        f"ASN MMDB："
+        f"{len(asn_mmdb_urls) if asn_groups else 0} 個"
+    )
+    print(
+        f"ASN Groups："
+        f"{len(asn_groups)} 個"
+    )
+    print(
+        f"Text tags："
+        f"{len(generated_files)} 個"
+    )
 
 
 if __name__ == "__main__":
     main()
+```
