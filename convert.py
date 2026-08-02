@@ -10,17 +10,51 @@ os.makedirs("data", exist_ok=True)
 with open("config.json", "r", encoding="utf-8") as f:
     config = json.load(f)
 
-# 如果設定檔中有指定 base_mmdb_url，自動下載 base.mmdb
-base_mmdb_url = config.get("base_mmdb_url", "")
-if base_mmdb_url:
-    print(f"[ Base MMDB ] 正在下載基底數據庫: {base_mmdb_url}")
-    req = urllib.request.Request(base_mmdb_url, headers={'User-Agent': 'Mozilla/5.0'})
+# 支援多個基底 MMDB
+base_mmdb_urls = config.get("base_mmdb_urls", [])
+
+# 向下兼容舊版 base_mmdb_url
+legacy_base_mmdb_url = config.get("base_mmdb_url", "")
+if legacy_base_mmdb_url and not base_mmdb_urls:
+    base_mmdb_urls = [legacy_base_mmdb_url]
+
+# 清除舊 MMDB，避免上次執行殘留
+for filename in os.listdir("."):
+    if re.fullmatch(r"base-\d+\.mmdb", filename):
+        os.remove(filename)
+
+for index, base_mmdb_url in enumerate(base_mmdb_urls, start=1):
+    output_name = f"base-{index}.mmdb"
+
+    print(
+        f"[ Base MMDB {index}/{len(base_mmdb_urls)} ] "
+        f"正在下載基底數據庫: {base_mmdb_url}"
+    )
+
+    req = urllib.request.Request(
+        base_mmdb_url,
+        headers={"User-Agent": "Mozilla/5.0"}
+    )
+
     try:
-        with urllib.request.urlopen(req) as response, open("base.mmdb", "wb") as out_file:
-            out_file.write(response.read())
-        print("  └─ 下載成功：base.mmdb")
+        with urllib.request.urlopen(req, timeout=120) as response:
+            content = response.read()
+
+        if not content:
+            raise RuntimeError("下載內容為空")
+
+        with open(output_name, "wb") as out_file:
+            out_file.write(content)
+
+        print(
+            f"  └─ 下載成功：{output_name} "
+            f"({len(content):,} bytes)"
+        )
+
     except Exception as e:
-        print(f"  └─ 下載失敗: {e}")
+        raise RuntimeError(
+            f"下載 MMDB 失敗：{base_mmdb_url}，原因：{e}"
+        ) from e
 
 def fetch_content(source):
     if source.startswith("http://") or source.startswith("https://"):
