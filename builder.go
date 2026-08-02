@@ -59,9 +59,10 @@ func main() {
 		}
 		defer reader.Close()
 
-		// 載入現有 MMDB 樹狀結構
+		// 設定允許處理重疊與 Aliased Network 的策略
 		writer, err = mmdbwriter.Load(baseFile, mmdbwriter.Options{
-			RecordSize: 24,
+			RecordSize:     24,
+			InsertStrategy: mmdbwriter.ReplaceWithCloser,
 		})
 		if err != nil {
 			fmt.Printf("Failed to load base MMDB into writer: %v\n", err)
@@ -144,15 +145,15 @@ func main() {
 
 				_, ipnet, err := net.ParseCIDR(cidr)
 				if err == nil {
-					// 注入 MMDB (Country 格式)
+					// 注入 MMDB
 					record := mmdbtype.Map{
 						"country": mmdbtype.Map{
 							"iso_code": mmdbtype.String(strings.ToUpper(tag)),
 						},
 					}
-					// mmdbwriter.InsertFuncFunc 或默認 Insert 行為
+					// 捕捉單條網段插入異常，確保不會卡死
 					if err := writer.Insert(ipnet, record); err != nil {
-						fmt.Printf("Warning: Failed to insert %s: %v\n", cidr, err)
+						fmt.Printf("Warning: Skipping insert for %s: %v\n", cidr, err)
 					}
 				}
 			}
