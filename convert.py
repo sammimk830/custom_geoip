@@ -1,155 +1,297 @@
-import os
+import ipaddress
 import json
+import os
 import re
 import urllib.request
 
-# 建立 output 資料夾
-os.makedirs("data", exist_ok=True)
+import maxminddb
 
-# 載入標準 config.json
-with open("config.json", "r", encoding="utf-8") as f:
-    config = json.load(f)
 
-# 支援多個基底 MMDB
-base_mmdb_urls = config.get("base_mmdb_urls", [])
+DATA_DIR = "data"
+COUNTRY_MMDB_FILE = "base.mmdb"
+ASN_MMDB_PREFIX = "asn-base"
 
-# 向下兼容舊版 base_mmdb_url
-legacy_base_mmdb_url = config.get("base_mmdb_url", "")
-if legacy_base_mmdb_url and not base_mmdb_urls:
-    base_mmdb_urls = [legacy_base_mmdb_url]
+os.makedirs(DATA_DIR, exist_ok=True)
 
-# 清除舊 MMDB，避免上次執行殘留
-for filename in os.listdir("."):
-    if re.fullmatch(r"base-\d+\.mmdb", filename):
-        os.remove(filename)
 
-for index, base_mmdb_url in enumerate(base_mmdb_urls, start=1):
-    output_name = f"base-{index}.mmdb"
+def download_file(url, output_path):
+    print(f"[ Download ] {url}")
 
-    print(
-        f"[ Base MMDB {index}/{len(base_mmdb_urls)} ] "
-        f"正在下載基底數據庫: {base_mmdb_url}"
-    )
-
-    req = urllib.request.Request(
-        base_mmdb_url,
-        headers={"User-Agent": "Mozilla/5.0"}
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0"},
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=120) as response:
+        with urllib.request.urlopen(request, timeout=180) as response:
             content = response.read()
 
         if not content:
             raise RuntimeError("下載內容為空")
 
-        with open(output_name, "wb") as out_file:
-            out_file.write(content)
+        with open(output_path, "wb") as output_file:
+            output_file.write(content)
 
-        print(
-            f"  └─ 下載成功：{output_name} "
-            f"({len(content):,} bytes)"
-        )
+        print(f"  └─ 已下載：{output_path} ({len(content):,} bytes)")
+        return True
 
-    except Exception as e:
-        raise RuntimeError(
-            f"下載 MMDB 失敗：{base_mmdb_url}，原因：{e}"
-        ) from e
+    except Exception as exc:
+        print(f"  └─ 下載失敗：{exc}")
+        return False
+
 
 def fetch_content(source):
-    if source.startswith("http://") or source.startswith("https://"):
-        print(f"  └─ 正在下載遠端規則: {source}")
-        req = urllib.request.Request(source, headers={'User-Agent': 'Mozilla/5.0'})
+    if source.startswith(("http://", "https://")):
+        print(f"  └─ 正在下載遠端規則：{source}")
+
+        request = urllib.request.Request(
+            source,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+
         try:
-            with urllib.request.urlopen(req) as response:
-                return response.read().decode('utf-8').splitlines()
-        except Exception as e:
-            print(f"  └─ 下載失敗 {source}: {e}")
-            return []
-    else:
-        print(f"  └─ 正在讀取本地規則: {source}")
-        if os.path.exists(source):
-            with open(source, "r", encoding="utf-8") as f:
-                return f.readlines()
-        else:
-            print(f"  └─ 警告：找不到本地檔案 {source}")
+            with urllib.request.urlopen(request, timeout=120) as response:
+                return response.read().decode(
+                    "utf-8",
+                    errors="ignore",
+                ).splitlines()
+
+        except Exception as exc:
+            print(f"  └─ 下載失敗 {source}：{exc}")
             return []
 
-def clean_ip_cidr(ip_str):
-    ip_str = ip_str.strip()
-    if re.match(r'^([0-9]{1,3}\.){3}[0-9]{1,3}$', ip_str):
-        return f"{ip_str}/32"
-    if re.match(r'^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$', ip_str):
-        return ip_str
-    if ':' in ip_str:
-        return ip_str if '/' in ip_str else f"{ip_str}/128"
-    return None
+    print(f"  └─ 正在讀取本地規則：{source}")
+
+    if not os.path.exists(source):
+        print(f"  └─ 警告：找不到本地檔案 {source}")
+        return []
+
+    try:
+        with open(source, "r", encoding="utf-8") as source_file:
+            return source_file.readlines()
+
+    except Exception as exc:
+        print(f"  └─ 讀取失敗 {source}：{exc}")
+        return []
+
+
+def clean_ip_cidr(ip_string):
+    ip_string = ip_string.strip()
+
+    try:
+        if "/" not in ip_string:
+            address = ipaddress.ip_address(ip_string)
+            prefix = 32 if address.version == 4 else 128
+            return f"{address}/{prefix}"
+
+        return str(
+            ipaddress.ip_network(
+                ip_string,
+                strict=False,
+            )
+        )
+
+    except ValueError:
+        return None
+
 
 def parse_line(line):
     line = line.strip()
-    if not line or line.startswith('#') or line.startswith('//') or line.startswith('payload:'):
+
+    if (
+        not line
+        or line.startswith("#")
+        or line.startswith("//")
+        or line.startswith("payload:")
+    ):
         return None
-    if ' #' in line:
-        line = line.split(' #', 1)[0]
-    elif '//' in line and not line.startswith('http'):
-        line = line.split('//', 1)[0]
-        
-    line = line.strip().lstrip('- ').replace("'", "").replace('"', '').strip()
+
+    if " #" in line:
+        line = line.split(" #", 1)[0]
+    elif "//" in line and not line.startswith("http"):
+        line = line.split("//", 1)[0]
+
+    line = (
+        line.strip()
+        .lstrip("- ")
+        .replace("'", "")
+        .replace('"', "")
+        .strip()
+    )
 
     ip_part = line
-    if ',' in line:
-        parts = [p.strip() for p in line.split(',')]
+
+    if "," in line:
+        parts = [part.strip() for part in line.split(",")]
+
+        if len(parts) < 2:
+            return None
+
         rule_type = parts[0].upper()
+
         if rule_type.startswith("DOMAIN") or rule_type == "REGEXP":
             return None
+
         ip_part = parts[1]
 
     return clean_ip_cidr(ip_part)
 
-categories = config.get("categories", config)
 
-for tag, cat_data in categories.items():
-    if tag.startswith("_"):
-        continue
+def get_asn_number(record):
+    if not isinstance(record, dict):
+        return None
 
-    print(f"\n[ Processing Category: {tag} ]")
-    rules_set = set()
-    exclude_set = set()
+    asn = record.get("autonomous_system_number")
 
-    exclude_list = cat_data.get("exclude_rules", []) if isinstance(cat_data, dict) else []
-    for ex_line in exclude_list:
-        parsed_ex = parse_line(ex_line)
-        if parsed_ex:
-            exclude_set.add(parsed_ex)
+    if isinstance(asn, int) and asn > 0:
+        return asn
 
-    sources = []
-    inline_rules = []
-    if isinstance(cat_data, dict):
-        sources.extend(cat_data.get("urls", []))
-        sources.extend(cat_data.get("local_files", []))
-        inline_rules = cat_data.get("inline_rules", [])
-    elif isinstance(cat_data, list):
-        sources = cat_data
+    if isinstance(asn, str) and asn.isdigit():
+        return int(asn)
 
-    for src_item in sources:
-        src_url = src_item.get("url", "") if isinstance(src_item, dict) else src_item
-        lines = fetch_content(src_url)
-        for line in lines:
-            parsed = parse_line(line)
-            if parsed:
-                rules_set.add(parsed)
+    return None
 
-    for inline_line in inline_rules:
-        parsed = parse_line(inline_line)
-        if parsed:
-            rules_set.add(parsed)
 
-    final_rules = rules_set - exclude_set
+def extract_asn_mmdb(mmdb_path, output_data):
+    print(f"\n[ ASN MMDB ] 正在處理：{mmdb_path}")
 
-    out_path = f"data/{tag}"
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(sorted(list(final_rules))) + "\n")
-        
-    print(f"  └─ Tag [{tag}] 完成: 最終輸出 {len(final_rules)} 條。")
+    generated_count = 0
+    skipped_count = 0
 
-print("\n所有 Category IP 處理完畢！")
+    with maxminddb.open_database(mmdb_path) as reader:
+        for network, record in reader:
+            asn = get_asn_number(record)
+
+            if not asn:
+                skipped_count += 1
+                continue
+
+            tag = f"as{asn}"
+            output_data.setdefault(tag, set()).add(str(network))
+            generated_count += 1
+
+    print(f"  ├─ 有效 ASN CIDR：{generated_count:,}")
+    print(f"  └─ 無 ASN 記錄：{skipped_count:,}")
+
+
+def write_data_files(output_data):
+    for tag, rules in output_data.items():
+        output_path = os.path.join(DATA_DIR, tag)
+
+        with open(output_path, "w", encoding="utf-8") as output_file:
+            if rules:
+                output_file.write("\n".join(sorted(rules)))
+                output_file.write("\n")
+
+        print(f"  └─ Tag [{tag}] 完成：輸出 {len(rules):,} 條")
+
+
+def main():
+    with open("config.json", "r", encoding="utf-8") as config_file:
+        config = json.load(config_file)
+
+    # Country MMDB 仍然下載成 base.mmdb，
+    # 留俾 workflow 使用 v2fly --base 合併。
+    country_mmdb_url = config.get("base_mmdb_url", "").strip()
+
+    if country_mmdb_url:
+        print("[ Country MMDB ] 正在下載基底數據庫")
+
+        if not download_file(
+            country_mmdb_url,
+            COUNTRY_MMDB_FILE,
+        ):
+            raise RuntimeError("Country MMDB 下載失敗")
+
+    output_data = {}
+
+    # 處理自訂分類。
+    categories = config.get("categories", {})
+
+    for tag, category_data in categories.items():
+        if tag.startswith("_"):
+            continue
+
+        print(f"\n[ Processing Category: {tag} ]")
+
+        rules_set = set()
+        exclude_set = set()
+
+        if isinstance(category_data, dict):
+            sources = (
+                category_data.get("urls", [])
+                + category_data.get("local_files", [])
+            )
+            inline_rules = category_data.get("inline_rules", [])
+            exclude_rules = category_data.get("exclude_rules", [])
+        elif isinstance(category_data, list):
+            sources = category_data
+            inline_rules = []
+            exclude_rules = []
+        else:
+            print("  └─ 分類格式無效，已跳過")
+            continue
+
+        for exclude_line in exclude_rules:
+            parsed_exclude = parse_line(exclude_line)
+
+            if parsed_exclude:
+                exclude_set.add(parsed_exclude)
+
+        for source_item in sources:
+            if isinstance(source_item, dict):
+                source = source_item.get("url", "")
+            else:
+                source = source_item
+
+            if not source:
+                continue
+
+            for line in fetch_content(source):
+                parsed_rule = parse_line(line)
+
+                if parsed_rule:
+                    rules_set.add(parsed_rule)
+
+        for inline_line in inline_rules:
+            parsed_rule = parse_line(inline_line)
+
+            if parsed_rule:
+                rules_set.add(parsed_rule)
+
+        output_data[tag] = rules_set - exclude_set
+
+    # ASN MMDB 唔會交俾 v2fly --base，
+    # 而係拆成 data/as13335、data/as4515 等普通 GeoIP tag。
+    asn_mmdb_urls = config.get("asn_mmdb_urls", [])
+
+    if isinstance(asn_mmdb_urls, str):
+        asn_mmdb_urls = [asn_mmdb_urls]
+
+    for index, asn_mmdb_url in enumerate(asn_mmdb_urls, start=1):
+        asn_mmdb_url = asn_mmdb_url.strip()
+
+        if not asn_mmdb_url:
+            continue
+
+        mmdb_path = f"{ASN_MMDB_PREFIX}-{index}.mmdb"
+
+        if not download_file(asn_mmdb_url, mmdb_path):
+            raise RuntimeError(
+                f"第 {index} 個 ASN MMDB 下載失敗"
+            )
+
+        try:
+            extract_asn_mmdb(mmdb_path, output_data)
+        finally:
+            if os.path.exists(mmdb_path):
+                os.remove(mmdb_path)
+
+    print("\n[ Output ] 正在輸出 data 檔案")
+    write_data_files(output_data)
+
+    print("\n所有 Country、ASN 同自訂 IP 規則處理完畢！")
+
+
+if __name__ == "__main__":
+    main()
