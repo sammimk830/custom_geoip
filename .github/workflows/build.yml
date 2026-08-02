@@ -76,6 +76,10 @@ jobs:
           echo "Generated Country MMDB files:"
           find . -maxdepth 1 -type f -name 'base-*.mmdb' -print | sort
 
+      # ============================================================
+      # Build full geoip.dat
+      # ============================================================
+
       - name: Clone v2fly geoip compiler
         shell: bash
         run: |
@@ -260,13 +264,498 @@ jobs:
           sha256sum geoip.dat \
             | tee geoip.dat.sha256sum
 
-      - name: Release geoip.dat with timestamp
+      # ============================================================
+      # Read SRS / MRS whitelist from config.json
+      # ============================================================
+
+      - name: Prepare selected rule-set sources
+        id: rulesets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf ruleset-source
+          mkdir -p ruleset-source/srs
+          mkdir -p ruleset-source/mrs
+
+          python <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          config = json.loads(
+              Path("config.json").read_text(encoding="utf-8")
+          )
+
+          outputs = config.get("ruleset_outputs", {})
+
+          if outputs is None:
+              outputs = {}
+
+          if not isinstance(outputs, dict):
+              raise TypeError(
+                  "ruleset_outputs must be a JSON object"
+              )
+
+          srs_tags = outputs.get("srs", [])
+          mrs_tags = outputs.get("mrs", [])
+
+          if not isinstance(srs_tags, list):
+              raise TypeError(
+                  "ruleset_outputs.srs must be an array"
+              )
+
+          if not isinstance(mrs_tags, list):
+              raise TypeError(
+                  "ruleset_outputs.mrs must be an array"
+              )
+
+          srs_tags = list(dict.fromkeys(
+              str(tag).strip().lower()
+              for tag in srs_tags
+              if str(tag).strip()
+          ))
+
+          mrs_tags = list(dict.fromkeys(
+              str(tag).strip().lower()
+              for tag in mrs_tags
+              if str(tag).strip()
+          ))
+
+          data_dir = Path("data")
+          srs_source_dir = Path("ruleset-source/srs")
+          mrs_source_dir = Path("ruleset-source/mrs")
+
+          def read_cidrs(tag: str) -> list[str]:
+              source_file = data_dir / tag
+
+              if not source_file.is_file():
+                  raise FileNotFoundError(
+                      f"Requested rule-set tag does not exist: {tag}"
+                  )
+
+              cidrs = [
+                  line.strip()
+                  for line in source_file.read_text(
+                      encoding="utf-8"
+                  ).splitlines()
+                  if line.strip()
+              ]
+
+              if not cidrs:
+                  raise RuntimeError(
+                      f"Requested rule-set tag is empty: {tag}"
+                  )
+
+              return cidrs
+
+          for tag in srs_tags:
+              cidrs = read_cidrs(tag)
+
+              source = {
+                  "version": 2,
+                  "rules": [
+                      {
+                          "ip_cidr": cidrs
+                      }
+                  ]
+              }
+
+              output_file = srs_source_dir / f"{tag}.json"
+
+              output_file.write_text(
+                  json.dumps(
+                      source,
+                      ensure_ascii=False,
+                      indent=2,
+                  ) + "\n",
+                  encoding="utf-8",
+              )
+
+              print(
+                  f"SRS source: {tag} "
+                  f"({len(cidrs)} CIDRs)"
+              )
+
+          for tag in mrs_tags:
+              cidrs = read_cidrs(tag)
+
+              output_file = mrs_source_dir / f"{tag}.txt"
+
+              output_file.write_text(
+                  "\n".join(cidrs) + "\n",
+                  encoding="utf-8",
+              )
+
+              print(
+                  f"MRS source: {tag} "
+                  f"({len(cidrs)} CIDRs)"
+              )
+
+          github_output = os.environ["GITHUB_OUTPUT"]
+
+          with open(
+              github_output,
+              "a",
+              encoding="utf-8",
+          ) as output:
+              output.write(
+                  f"srs_count={len(srs_tags)}\n"
+              )
+              output.write(
+                  f"mrs_count={len(mrs_tags)}\n"
+              )
+
+          print(f"Selected SRS tags: {srs_tags}")
+          print(f"Selected MRS tags: {mrs_tags}")
+          PY
+
+      # ============================================================
+      # Build SRS
+      # ============================================================
+
+      - name: Install sing-box
+        if: steps.rulesets.outputs.srs_count != '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DOWNLOAD_URL="$(
+            python <<'PY'
+          import json
+          import platform
+          import urllib.request
+
+          architecture = platform.machine().lower()
+
+          architecture_map = {
+              "x86_64": "linux-amd64",
+              "amd64": "linux-amd64",
+              "aarch64": "linux-arm64",
+              "arm64": "linux-arm64",
+          }
+
+          target = architecture_map.get(architecture)
+
+          if not target:
+              raise RuntimeError(
+                  f"Unsupported architecture: {architecture}"
+              )
+
+          request = urllib.request.Request(
+              "https://api.github.com/repos/SagerNet/sing-box/releases/latest",
+              headers={
+                  "User-Agent": "custom-geoip-builder"
+              },
+          )
+
+          with urllib.request.urlopen(
+              request,
+              timeout=60,
+          ) as response:
+              release = json.load(response)
+
+          for asset in release.get("assets", []):
+              name = asset.get("name", "")
+
+              if (
+                  target in name
+                  and name.endswith(".tar.gz")
+              ):
+                  print(asset["browser_download_url"])
+                  break
+          else:
+              raise RuntimeError(
+                  f"Cannot find sing-box asset for {target}"
+              )
+          PY
+          )"
+
+          curl -fL \
+            "$DOWNLOAD_URL" \
+            -o sing-box.tar.gz
+
+          rm -rf sing-box-extract
+          mkdir -p sing-box-extract
+
+          tar -xzf sing-box.tar.gz \
+            -C sing-box-extract
+
+          SING_BOX_BINARY="$(
+            find sing-box-extract \
+              -type f \
+              -name sing-box \
+              -print \
+              -quit
+          )"
+
+          if [ -z "$SING_BOX_BINARY" ]; then
+            echo "Error: sing-box binary not found."
+            exit 1
+          fi
+
+          sudo install \
+            -m 0755 \
+            "$SING_BOX_BINARY" \
+            /usr/local/bin/sing-box
+
+          sing-box version
+
+      - name: Compile selected SRS rule sets
+        if: steps.rulesets.outputs.srs_count != '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf srs
+          mkdir -p srs
+
+          for source_file in ruleset-source/srs/*.json; do
+            if [ ! -f "$source_file" ]; then
+              continue
+            fi
+
+            tag="$(basename "$source_file" .json)"
+
+            sing-box rule-set compile \
+              --output "srs/${tag}.srs" \
+              "$source_file"
+
+            if [ ! -s "srs/${tag}.srs" ]; then
+              echo "Error: failed to generate srs/${tag}.srs"
+              exit 1
+            fi
+
+            echo "Generated: srs/${tag}.srs"
+          done
+
+      # ============================================================
+      # Build MRS
+      # ============================================================
+
+      - name: Install Mihomo
+        if: steps.rulesets.outputs.mrs_count != '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DOWNLOAD_URL="$(
+            python <<'PY'
+          import json
+          import platform
+          import urllib.request
+
+          architecture = platform.machine().lower()
+
+          architecture_map = {
+              "x86_64": "linux-amd64",
+              "amd64": "linux-amd64",
+              "aarch64": "linux-arm64",
+              "arm64": "linux-arm64",
+          }
+
+          target = architecture_map.get(architecture)
+
+          if not target:
+              raise RuntimeError(
+                  f"Unsupported architecture: {architecture}"
+              )
+
+          request = urllib.request.Request(
+              "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest",
+              headers={
+                  "User-Agent": "custom-geoip-builder"
+              },
+          )
+
+          with urllib.request.urlopen(
+              request,
+              timeout=60,
+          ) as response:
+              release = json.load(response)
+
+          candidates = []
+
+          for asset in release.get("assets", []):
+              name = asset.get("name", "").lower()
+
+              if target not in name:
+                  continue
+
+              if not name.endswith(".gz"):
+                  continue
+
+              if any(
+                  excluded in name
+                  for excluded in (
+                      "compatible",
+                      "go120",
+                      "musl",
+                      "deb",
+                      "rpm",
+                  )
+              ):
+                  continue
+
+              candidates.append(asset)
+
+          if not candidates:
+              raise RuntimeError(
+                  f"Cannot find Mihomo asset for {target}"
+              )
+
+          candidates.sort(
+              key=lambda asset: len(asset["name"])
+          )
+
+          print(
+              candidates[0]["browser_download_url"]
+          )
+          PY
+          )"
+
+          curl -fL \
+            "$DOWNLOAD_URL" \
+            -o mihomo.gz
+
+          gzip -dc mihomo.gz > mihomo
+          chmod +x mihomo
+
+          sudo install \
+            -m 0755 \
+            mihomo \
+            /usr/local/bin/mihomo
+
+          mihomo -v
+
+      - name: Compile selected MRS rule sets
+        if: steps.rulesets.outputs.mrs_count != '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf mrs
+          mkdir -p mrs
+
+          for source_file in ruleset-source/mrs/*.txt; do
+            if [ ! -f "$source_file" ]; then
+              continue
+            fi
+
+            tag="$(basename "$source_file" .txt)"
+
+            mihomo convert-ruleset \
+              ipcidr \
+              text \
+              "$source_file" \
+              "mrs/${tag}.mrs"
+
+            if [ ! -s "mrs/${tag}.mrs" ]; then
+              echo "Error: failed to generate mrs/${tag}.mrs"
+              exit 1
+            fi
+
+            echo "Generated: mrs/${tag}.mrs"
+          done
+
+      - name: Verify generated rule sets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ steps.rulesets.outputs.srs_count }}" != "0" ]; then
+            echo "Generated SRS files:"
+            find srs \
+              -maxdepth 1 \
+              -type f \
+              -name '*.srs' \
+              -print \
+              | sort
+
+            SRS_COUNT="$(
+              find srs \
+                -maxdepth 1 \
+                -type f \
+                -name '*.srs' \
+                | wc -l
+            )"
+
+            if [ "$SRS_COUNT" -ne "${{ steps.rulesets.outputs.srs_count }}" ]; then
+              echo "Error: SRS output count mismatch."
+              exit 1
+            fi
+          fi
+
+          if [ "${{ steps.rulesets.outputs.mrs_count }}" != "0" ]; then
+            echo "Generated MRS files:"
+            find mrs \
+              -maxdepth 1 \
+              -type f \
+              -name '*.mrs' \
+              -print \
+              | sort
+
+            MRS_COUNT="$(
+              find mrs \
+                -maxdepth 1 \
+                -type f \
+                -name '*.mrs' \
+                | wc -l
+            )"
+
+            if [ "$MRS_COUNT" -ne "${{ steps.rulesets.outputs.mrs_count }}" ]; then
+              echo "Error: MRS output count mismatch."
+              exit 1
+            fi
+          fi
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -f rulesets.sha256sum
+
+          if [ -d "srs" ]; then
+            find srs \
+              -maxdepth 1 \
+              -type f \
+              -name '*.srs' \
+              -print0 \
+              | sort -z \
+              | xargs -0 -r sha256sum \
+              >> rulesets.sha256sum
+          fi
+
+          if [ -d "mrs" ]; then
+            find mrs \
+              -maxdepth 1 \
+              -type f \
+              -name '*.mrs' \
+              -print0 \
+              | sort -z \
+              | xargs -0 -r sha256sum \
+              >> rulesets.sha256sum
+          fi
+
+          if [ ! -s "rulesets.sha256sum" ]; then
+            echo "No SRS or MRS files configured." \
+              > rulesets.sha256sum
+          fi
+
+          cat rulesets.sha256sum
+
+      # ============================================================
+      # Release
+      # ============================================================
+
+      - name: Release files with timestamp
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.time.outputs.TIMESTAMP }}
           name: ${{ steps.time.outputs.TIMESTAMP }}
           body: |
-            Auto-built custom geoip.dat.
+            Auto-built custom GeoIP and rule-set files.
 
             Build time: ${{ steps.time.outputs.TIMESTAMP }} HKT
           draft: false
@@ -275,6 +764,9 @@ jobs:
           files: |
             geoip.dat
             geoip.dat.sha256sum
+            rulesets.sha256sum
+            srs/*.srs
+            mrs/*.mrs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -284,7 +776,7 @@ jobs:
           tag_name: release
           name: Latest Release
           body: |
-            Always contains the latest custom geoip.dat.
+            Always contains the latest custom GeoIP and rule-set files.
 
             Build time: ${{ steps.time.outputs.TIMESTAMP }} HKT
           draft: false
@@ -293,5 +785,8 @@ jobs:
           files: |
             geoip.dat
             geoip.dat.sha256sum
+            rulesets.sha256sum
+            srs/*.srs
+            mrs/*.mrs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
