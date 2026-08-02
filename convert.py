@@ -219,17 +219,17 @@ def normalize_asn_groups(
 
         for value in values:
             if isinstance(value, str):
-                value = value.strip().upper()
+                normalized_value = value.strip().upper()
 
-                if value.startswith("AS"):
-                    value = value[2:]
+                if normalized_value.startswith("AS"):
+                    normalized_value = normalized_value[2:]
 
-                if not value.isdigit():
+                if not normalized_value.isdigit():
                     raise ValueError(
                         f"{group_name} 包含無效 ASN：{value}"
                     )
 
-                number = int(value)
+                number = int(normalized_value)
 
             elif isinstance(value, int):
                 number = value
@@ -654,4 +654,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-```
