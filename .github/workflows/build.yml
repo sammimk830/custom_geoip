@@ -1,0 +1,74 @@
+name: Build Custom geoip.dat with Base MMDB
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  schedule:
+    - cron: '0 20 * * *'  # 每天香港時間 04:00 自動更新
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: false
+
+      - name: Get current timestamp (HKT)
+        id: time
+        run: |
+          echo "TIMESTAMP=$(TZ='Asia/Hong_Kong' date +'%Y%m%d%H%M%S')" >> $GITHUB_OUTPUT
+
+      - name: Build and Run MMDB Merger
+        run: |
+          go mod tidy
+          go run builder.go
+
+      - name: Convert MMDB to geoip.dat
+        run: |
+          # 下載 maxminddb-to-geoip 工具轉換為 v2ray geoip.dat 格式
+          git clone --depth 1 https://github.com/v2fly/geoip.git compiler
+          cp Country.mmdb compiler/
+          cd compiler
+          go run ./ --input ./Country.mmdb --output ./output
+          if [ -f "output/geoip.dat" ]; then
+            mv output/geoip.dat ../geoip.dat
+          fi
+
+      - name: Release geoip.dat (Timestamp)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.time.outputs.TIMESTAMP }}
+          name: "${{ steps.time.outputs.TIMESTAMP }}"
+          body: "Auto-built geoip.dat with Base MMDB at ${{ steps.time.outputs.TIMESTAMP }}"
+          draft: false
+          prerelease: false
+          files: |
+            geoip.dat
+            Country.mmdb
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update Latest Tag
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: release
+          name: "Latest Release"
+          body: "Always points to the latest geoip.dat and Country.mmdb"
+          draft: false
+          prerelease: false
+          files: |
+            geoip.dat
+            Country.mmdb
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
