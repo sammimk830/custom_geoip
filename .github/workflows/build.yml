@@ -31,6 +31,14 @@ jobs:
         with:
           python-version: "3.x"
 
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python -m pip install --upgrade pip
+          python -m pip install maxminddb
+
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
@@ -42,6 +50,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           echo "TIMESTAMP=$(TZ='Asia/Hong_Kong' date +'%Y%m%d%H%M%S')" >> "$GITHUB_OUTPUT"
 
       - name: Process and Extract IP Rules
@@ -51,11 +60,8 @@ jobs:
 
           python convert.py
 
-          echo "Generated files:"
-          find data -maxdepth 1 -type f -print || true
-
           if [ ! -d "data" ]; then
-            echo "Error: convert.py did not create the data directory."
+            echo "Error: convert.py did not create data directory."
             exit 1
           fi
 
@@ -64,13 +70,23 @@ jobs:
             exit 1
           fi
 
+          echo "Generated text rule files:"
+          find data -maxdepth 1 -type f -print | sort
+
+          echo "Generated Country MMDB files:"
+          find . -maxdepth 1 -type f -name 'base-*.mmdb' -print | sort
+
       - name: Clone v2fly geoip compiler
         shell: bash
         run: |
           set -euo pipefail
 
           rm -rf compiler
-          git clone --depth 1 https://github.com/v2fly/geoip.git compiler
+
+          git clone \
+            --depth 1 \
+            https://github.com/v2fly/geoip.git \
+            compiler
 
           echo "Compiler commit:"
           git -C compiler rev-parse HEAD
@@ -79,50 +95,69 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-      
+
           rm -rf compiler/data
           rm -rf compiler/mmdb
-      
+
           cp -r data compiler/data
           mkdir -p compiler/mmdb
-      
+
           MMDB_COUNT=0
-      
+
           for mmdb_file in base-*.mmdb; do
             if [ ! -f "$mmdb_file" ]; then
               continue
             fi
-      
-            cp "$mmdb_file" "compiler/mmdb/"
+
+            cp "$mmdb_file" compiler/mmdb/
+
             MMDB_COUNT=$((MMDB_COUNT + 1))
-            echo "Copied $mmdb_file"
+
+            echo "Copied Country MMDB: $mmdb_file"
           done
-      
-          echo "Total MMDB files copied: $MMDB_COUNT"
-      
-          echo "Compiler input files:"
-          find compiler/data compiler/mmdb -maxdepth 1 -type f -print
+
+          echo "Total Country MMDB files copied: $MMDB_COUNT"
+
+          if [ "$MMDB_COUNT" -eq 0 ]; then
+            echo "Warning: no Country MMDB files were configured."
+          fi
+
+          echo "Compiler text inputs:"
+          find compiler/data \
+            -maxdepth 1 \
+            -type f \
+            -print \
+            | sort
+
+          echo "Compiler MMDB inputs:"
+          find compiler/mmdb \
+            -maxdepth 1 \
+            -type f \
+            -print \
+            | sort
 
       - name: Create v2fly compiler config
         shell: bash
         run: |
           set -euo pipefail
-      
+
           python <<'PY'
           import glob
           import json
           import os
-      
+
           inputs = []
-      
-          mmdb_files = sorted(glob.glob("compiler/mmdb/base-*.mmdb"))
-      
+
+          mmdb_files = sorted(
+              glob.glob("compiler/mmdb/base-*.mmdb")
+          )
+
           for mmdb_file in mmdb_files:
               relative_path = "./" + os.path.relpath(
                   mmdb_file,
-                  start="compiler"
+                  start="compiler",
               ).replace("\\", "/")
-      
+
               inputs.append({
                   "type": "maxmindMMDB",
                   "action": "add",
@@ -130,7 +165,7 @@ jobs:
                       "uri": relative_path
                   }
               })
-      
+
           inputs.append({
               "type": "text",
               "action": "add",
@@ -138,7 +173,7 @@ jobs:
                   "inputDir": "./data"
               }
           })
-      
+
           compiler_config = {
               "input": inputs,
               "output": [
@@ -152,22 +187,25 @@ jobs:
                   }
               ]
           }
-      
+
           with open(
               "compiler/custom-config.json",
               "w",
-              encoding="utf-8"
+              encoding="utf-8",
           ) as config_file:
               json.dump(
                   compiler_config,
                   config_file,
                   ensure_ascii=False,
-                  indent=2
+                  indent=2,
               )
-      
-          print(f"Added {len(mmdb_files)} MMDB files.")
+
+          print(
+              f"Added {len(mmdb_files)} "
+              "Country MMDB files."
+          )
           PY
-      
+
           echo "Compiler config:"
           cat compiler/custom-config.json
 
@@ -185,7 +223,12 @@ jobs:
 
           if [ ! -f "output/geoip.dat" ]; then
             echo "Error: output/geoip.dat was not generated."
-            find . -maxdepth 3 -type f -print
+
+            find . \
+              -maxdepth 3 \
+              -type f \
+              -print
+
             exit 1
           fi
 
@@ -214,9 +257,9 @@ jobs:
           echo "Generated geoip.dat:"
           ls -lh geoip.dat
 
-          sha256sum geoip.dat | tee geoip.dat.sha256sum
+          sha256sum geoip.dat \
+            | tee geoip.dat.sha256sum
 
-      # 1. 建立獨立年月日時分秒 Release (歷史備份)
       - name: Release geoip.dat with timestamp
         uses: softprops/action-gh-release@v2
         with:
@@ -235,7 +278,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # 2. 更新固定 Latest Release 標籤 (供客戶端固定 URL 訂閱)
       - name: Update fixed release tag
         uses: softprops/action-gh-release@v2
         with:
