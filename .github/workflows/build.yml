@@ -277,80 +277,205 @@ jobs:
           rm -rf ruleset-source
           mkdir -p ruleset-source/srs
           mkdir -p ruleset-source/mrs
+          mkdir -p ruleset-source/surge
 
           python <<'PY'
+          import ipaddress
           import json
           import os
+          import re
           from pathlib import Path
+
+          import maxminddb
 
           config = json.loads(
               Path("config.json").read_text(encoding="utf-8")
           )
 
-          outputs = config.get("ruleset_outputs", {})
-
-          if outputs is None:
-              outputs = {}
+          outputs = config.get("ruleset_outputs", {}) or {}
 
           if not isinstance(outputs, dict):
               raise TypeError(
                   "ruleset_outputs must be a JSON object"
               )
 
-          srs_tags = outputs.get("srs", [])
-          mrs_tags = outputs.get("mrs", [])
+          def normalize_tags(value, field_name):
+              if value is None:
+                  return []
 
-          if not isinstance(srs_tags, list):
-              raise TypeError(
-                  "ruleset_outputs.srs must be an array"
-              )
+              if not isinstance(value, list):
+                  raise TypeError(
+                      f"{field_name} must be an array"
+                  )
 
-          if not isinstance(mrs_tags, list):
-              raise TypeError(
-                  "ruleset_outputs.mrs must be an array"
-              )
+              tags = []
+              seen = set()
 
-          srs_tags = list(dict.fromkeys(
-              str(tag).strip().lower()
-              for tag in srs_tags
-              if str(tag).strip()
-          ))
+              for item in value:
+                  tag = str(item).strip().lower()
 
-          mrs_tags = list(dict.fromkeys(
-              str(tag).strip().lower()
-              for tag in mrs_tags
-              if str(tag).strip()
+                  if not tag:
+                      continue
+
+                  if not re.fullmatch(r"[a-z0-9_-]+", tag):
+                      raise ValueError(
+                          f"Invalid rule-set tag: {tag}"
+                      )
+
+                  if tag not in seen:
+                      seen.add(tag)
+                      tags.append(tag)
+
+              return tags
+
+          srs_tags = normalize_tags(
+              outputs.get("srs", []),
+              "ruleset_outputs.srs",
+          )
+          mrs_tags = normalize_tags(
+              outputs.get("mrs", []),
+              "ruleset_outputs.mrs",
+          )
+          surge_tags = normalize_tags(
+              outputs.get("surge", []),
+              "ruleset_outputs.surge",
+          )
+
+          all_tags = list(dict.fromkeys(
+              srs_tags + mrs_tags + surge_tags
           ))
 
           data_dir = Path("data")
           srs_source_dir = Path("ruleset-source/srs")
           mrs_source_dir = Path("ruleset-source/mrs")
+          surge_source_dir = Path("ruleset-source/surge")
 
-          def read_cidrs(tag: str) -> list[str]:
-              source_file = data_dir / tag
+          country_mmdb_files = sorted(
+              Path(".").glob("base-*.mmdb")
+          )
 
-              if not source_file.is_file():
-                  raise FileNotFoundError(
-                      f"Requested rule-set tag does not exist: {tag}"
-                  )
+          country_cache = {}
 
-              cidrs = [
-                  line.strip()
-                  for line in source_file.read_text(
-                      encoding="utf-8"
-                  ).splitlines()
-                  if line.strip()
+          def get_country_code(record):
+              if not isinstance(record, dict):
+                  return None
+
+              candidates = [
+                  record.get("country"),
+                  record.get("registered_country"),
+                  record.get("represented_country"),
               ]
 
-              if not cidrs:
-                  raise RuntimeError(
-                      f"Requested rule-set tag is empty: {tag}"
+              for candidate in candidates:
+                  if isinstance(candidate, dict):
+                      value = candidate.get("iso_code")
+
+                      if isinstance(value, str) and value.strip():
+                          return value.strip().lower()
+
+              for key in (
+                  "country_code",
+                  "iso_code",
+                  "code",
+              ):
+                  value = record.get(key)
+
+                  if isinstance(value, str) and value.strip():
+                      return value.strip().lower()
+
+              return None
+
+          def extract_country_cidrs(tag):
+              if tag in country_cache:
+                  return country_cache[tag]
+
+              if not re.fullmatch(r"[a-z]{2}", tag):
+                  return []
+
+              if not country_mmdb_files:
+                  return []
+
+              cidrs = set()
+
+              for mmdb_file in country_mmdb_files:
+                  print(
+                      f"Extracting country {tag.upper()} "
+                      f"from {mmdb_file}"
                   )
 
-              return cidrs
+                  with maxminddb.open_database(
+                      str(mmdb_file)
+                  ) as reader:
+                      for network, record in reader:
+                          country_code = get_country_code(record)
+
+                          if country_code == tag:
+                              cidrs.add(str(network))
+
+              result = sorted(
+                  cidrs,
+                  key=lambda value: (
+                      ipaddress.ip_network(value).version,
+                      int(
+                          ipaddress.ip_network(
+                              value
+                          ).network_address
+                      ),
+                      ipaddress.ip_network(value).prefixlen,
+                  ),
+              )
+
+              country_cache[tag] = result
+              return result
+
+          def read_cidrs(tag):
+              source_file = data_dir / tag
+
+              if source_file.is_file():
+                  cidrs = [
+                      line.strip()
+                      for line in source_file.read_text(
+                          encoding="utf-8"
+                      ).splitlines()
+                      if line.strip()
+                      and not line.lstrip().startswith("#")
+                  ]
+              else:
+                  cidrs = extract_country_cidrs(tag)
+
+              if not cidrs:
+                  raise FileNotFoundError(
+                      "Requested rule-set tag does not exist "
+                      f"in data/ and could not be extracted "
+                      f"from Country MMDB: {tag}"
+                  )
+
+              valid_cidrs = []
+
+              for cidr in cidrs:
+                  try:
+                      valid_cidrs.append(
+                          str(
+                              ipaddress.ip_network(
+                                  cidr,
+                                  strict=False,
+                              )
+                          )
+                      )
+                  except ValueError as exc:
+                      raise ValueError(
+                          f"Invalid CIDR in tag {tag}: {cidr}"
+                      ) from exc
+
+              return list(dict.fromkeys(valid_cidrs))
+
+          cidr_cache = {
+              tag: read_cidrs(tag)
+              for tag in all_tags
+          }
 
           for tag in srs_tags:
-              cidrs = read_cidrs(tag)
+              cidrs = cidr_cache[tag]
 
               source = {
                   "version": 2,
@@ -378,7 +503,7 @@ jobs:
               )
 
           for tag in mrs_tags:
-              cidrs = read_cidrs(tag)
+              cidrs = cidr_cache[tag]
 
               output_file = mrs_source_dir / f"{tag}.txt"
 
@@ -392,22 +517,52 @@ jobs:
                   f"({len(cidrs)} CIDRs)"
               )
 
-          github_output = os.environ["GITHUB_OUTPUT"]
+          for tag in surge_tags:
+              cidrs = cidr_cache[tag]
+              rules = []
+
+              for cidr in cidrs:
+                  network = ipaddress.ip_network(
+                      cidr,
+                      strict=False,
+                  )
+
+                  rule_type = (
+                      "IP-CIDR"
+                      if network.version == 4
+                      else "IP-CIDR6"
+                  )
+
+                  rules.append(
+                      f"{rule_type},{network},no-resolve"
+                  )
+
+              output_file = surge_source_dir / f"{tag}.list"
+
+              output_file.write_text(
+                  "\n".join(rules) + "\n",
+                  encoding="utf-8",
+              )
+
+              print(
+                  f"Surge source: {tag} "
+                  f"({len(rules)} rules)"
+              )
 
           with open(
-              github_output,
+              os.environ["GITHUB_OUTPUT"],
               "a",
               encoding="utf-8",
           ) as output:
+              output.write(f"srs_count={len(srs_tags)}\n")
+              output.write(f"mrs_count={len(mrs_tags)}\n")
               output.write(
-                  f"srs_count={len(srs_tags)}\n"
-              )
-              output.write(
-                  f"mrs_count={len(mrs_tags)}\n"
+                  f"surge_count={len(surge_tags)}\n"
               )
 
           print(f"Selected SRS tags: {srs_tags}")
           print(f"Selected MRS tags: {mrs_tags}")
+          print(f"Selected Surge tags: {surge_tags}")
           PY
 
       # ============================================================
@@ -658,56 +813,97 @@ jobs:
             echo "Generated: mrs/${tag}.mrs"
           done
 
+      # ============================================================
+      # Build Surge / Shadowrocket lists
+      # ============================================================
+
+      - name: Build selected Surge rule sets
+        if: steps.rulesets.outputs.surge_count != '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf surge
+          mkdir -p surge
+
+          cp ruleset-source/surge/*.list surge/
+
+          for output_file in surge/*.list; do
+            if [ ! -s "$output_file" ]; then
+              echo "Error: failed to generate $output_file"
+              exit 1
+            fi
+
+            echo "Generated: $output_file"
+          done
+
       - name: Verify generated rule sets
         shell: bash
         run: |
           set -euo pipefail
 
-          if [ "${{ steps.rulesets.outputs.srs_count }}" != "0" ]; then
-            echo "Generated SRS files:"
-            find srs \
-              -maxdepth 1 \
-              -type f \
-              -name '*.srs' \
-              -print \
-              | sort
+          EXPECTED_SRS="${{ steps.rulesets.outputs.srs_count }}"
+          EXPECTED_MRS="${{ steps.rulesets.outputs.mrs_count }}"
+          EXPECTED_SURGE="${{ steps.rulesets.outputs.surge_count }}"
 
-            SRS_COUNT="$(
+          ACTUAL_SRS=0
+          ACTUAL_MRS=0
+          ACTUAL_SURGE=0
+
+          if [ -d "srs" ]; then
+            ACTUAL_SRS="$(
               find srs \
                 -maxdepth 1 \
                 -type f \
                 -name '*.srs' \
                 | wc -l
             )"
-
-            if [ "$SRS_COUNT" -ne "${{ steps.rulesets.outputs.srs_count }}" ]; then
-              echo "Error: SRS output count mismatch."
-              exit 1
-            fi
           fi
 
-          if [ "${{ steps.rulesets.outputs.mrs_count }}" != "0" ]; then
-            echo "Generated MRS files:"
-            find mrs \
-              -maxdepth 1 \
-              -type f \
-              -name '*.mrs' \
-              -print \
-              | sort
-
-            MRS_COUNT="$(
+          if [ -d "mrs" ]; then
+            ACTUAL_MRS="$(
               find mrs \
                 -maxdepth 1 \
                 -type f \
                 -name '*.mrs' \
                 | wc -l
             )"
-
-            if [ "$MRS_COUNT" -ne "${{ steps.rulesets.outputs.mrs_count }}" ]; then
-              echo "Error: MRS output count mismatch."
-              exit 1
-            fi
           fi
+
+          if [ -d "surge" ]; then
+            ACTUAL_SURGE="$(
+              find surge \
+                -maxdepth 1 \
+                -type f \
+                -name '*.list' \
+                | wc -l
+            )"
+          fi
+
+          echo "SRS: ${ACTUAL_SRS}/${EXPECTED_SRS}"
+          echo "MRS: ${ACTUAL_MRS}/${EXPECTED_MRS}"
+          echo "Surge: ${ACTUAL_SURGE}/${EXPECTED_SURGE}"
+
+          if [ "$ACTUAL_SRS" -ne "$EXPECTED_SRS" ]; then
+            echo "Error: SRS output count mismatch."
+            exit 1
+          fi
+
+          if [ "$ACTUAL_MRS" -ne "$EXPECTED_MRS" ]; then
+            echo "Error: MRS output count mismatch."
+            exit 1
+          fi
+
+          if [ "$ACTUAL_SURGE" -ne "$EXPECTED_SURGE" ]; then
+            echo "Error: Surge output count mismatch."
+            exit 1
+          fi
+
+          find srs mrs surge \
+            -maxdepth 1 \
+            -type f \
+            -print 2>/dev/null \
+            | sort || true
 
       - name: Generate checksums
         shell: bash
@@ -716,30 +912,21 @@ jobs:
 
           rm -f rulesets.sha256sum
 
-          if [ -d "srs" ]; then
-            find srs \
-              -maxdepth 1 \
-              -type f \
+          find srs mrs surge \
+            -maxdepth 1 \
+            -type f \
+            \( \
               -name '*.srs' \
-              -print0 \
-              | sort -z \
-              | xargs -0 -r sha256sum \
-              >> rulesets.sha256sum
-          fi
-
-          if [ -d "mrs" ]; then
-            find mrs \
-              -maxdepth 1 \
-              -type f \
-              -name '*.mrs' \
-              -print0 \
-              | sort -z \
-              | xargs -0 -r sha256sum \
-              >> rulesets.sha256sum
-          fi
+              -o -name '*.mrs' \
+              -o -name '*.list' \
+            \) \
+            -print0 2>/dev/null \
+            | sort -z \
+            | xargs -0 -r sha256sum \
+            > rulesets.sha256sum
 
           if [ ! -s "rulesets.sha256sum" ]; then
-            echo "No SRS or MRS files configured." \
+            echo "No SRS, MRS or Surge files configured." \
               > rulesets.sha256sum
           fi
 
@@ -755,7 +942,7 @@ jobs:
           tag_name: ${{ steps.time.outputs.TIMESTAMP }}
           name: ${{ steps.time.outputs.TIMESTAMP }}
           body: |
-            Auto-built custom GeoIP and rule-set files.
+            Auto-built custom GeoIP, SRS, MRS and Surge rule-set files.
 
             Build time: ${{ steps.time.outputs.TIMESTAMP }} HKT
           draft: false
@@ -767,6 +954,7 @@ jobs:
             rulesets.sha256sum
             srs/*.srs
             mrs/*.mrs
+            surge/*.list
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -776,7 +964,7 @@ jobs:
           tag_name: release
           name: Latest Release
           body: |
-            Always contains the latest custom GeoIP and rule-set files.
+            Always contains the latest custom GeoIP, SRS, MRS and Surge rule-set files.
 
             Build time: ${{ steps.time.outputs.TIMESTAMP }} HKT
           draft: false
@@ -788,5 +976,6 @@ jobs:
             rulesets.sha256sum
             srs/*.srs
             mrs/*.mrs
+            surge/*.list
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
