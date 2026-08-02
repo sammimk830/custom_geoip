@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/maxmind/mmdbwriter"
+	"github.com/maxmind/mmdbwriter/inserter"
 	"github.com/maxmind/mmdbwriter/mmdbtype"
 	"github.com/oschwald/maxminddb-golang"
 )
@@ -52,6 +53,7 @@ func main() {
 			os.Exit(1)
 		}
 
+		// 開啟 Base MMDB
 		reader, err := maxminddb.Open(baseFile)
 		if err != nil {
 			fmt.Printf("Failed to open base MMDB: %v\n", err)
@@ -59,22 +61,37 @@ func main() {
 		}
 		defer reader.Close()
 
-		// 自訂全相容 FuncGenerator，處理衝突與 2001::/32 重疊網段
-		customInserter := func(_ mmdbwriter.InserterFunc) mmdbwriter.InserterFunc {
-			return func(newVal, _ mmdbtype.DataType) (mmdbtype.DataType, error) {
-				return newVal, nil
-			}
-		}
-
+		// 官方標準：Load 只帶基礎 Options (無 Inserter 欄位)
 		writer, err = mmdbwriter.Load(baseFile, mmdbwriter.Options{
 			RecordSize: 24,
-			Inserter:   customInserter,
 		})
 		if err != nil {
-			fmt.Printf("Failed to load base MMDB into writer: %v\n", err)
-			os.Exit(1)
+			fmt.Printf("Warning: Direct mmdbwriter.Load failed (%v). Creating fresh Tree and copying records...\n", err)
+			// 若 base MMDB 含有 Aliased 衝突網段，改用安全遍歷 (Traverse) 複製
+			writer, err = mmdbwriter.New(mmdbwriter.Options{
+				DatabaseType: "GeoIP2-Country",
+				RecordSize:   24,
+			})
+			if err != nil {
+				fmt.Printf("Failed to create new MMDB writer: %v\n", err)
+				os.Exit(1)
+			}
+
+			// 手動 Safe Traverse 將 Base MMDB 內容寫入新樹
+			networks := reader.Networks(maxminddb.SkipAliasedNetworks)
+			for networks.Next() {
+				var record interface{}
+				subnet, err := networks.Network(&record)
+				if err != nil {
+					continue
+				}
+				// 轉換為 mmdbtype 並寫入
+				if mmdbRecord, err := mmdbtype.FromMap(record); err == nil {
+					_ = writer.InsertFunc(subnet, inserter.TopLevelPropertyWith(inserter.Replace), mmdbRecord)
+				}
+			}
 		}
-		fmt.Println("Successfully loaded base MMDB.")
+		fmt.Println("Successfully initialized base MMDB Tree.")
 	} else {
 		writer, err = mmdbwriter.New(mmdbwriter.Options{
 			DatabaseType: "GeoIP2-Country",
@@ -143,7 +160,7 @@ func main() {
 			}
 		}
 
-		// 執行剔除與寫入
+		// 執行剔除與寫入 (使用官方推薦的 InsertFunc + inserter.TopLevelPropertyWith)
 		var finalCIDRs []string
 		for cidr := range ruleMap {
 			if !excludeMap[cidr] {
@@ -151,13 +168,14 @@ func main() {
 
 				_, ipnet, err := net.ParseCIDR(cidr)
 				if err == nil {
-					// 注入 MMDB
 					record := mmdbtype.Map{
 						"country": mmdbtype.Map{
 							"iso_code": mmdbtype.String(strings.ToUpper(tag)),
 						},
 					}
-					if err := writer.Insert(ipnet, record); err != nil {
+					// 官方標準: InsertFunc(ipnet, inserter.TopLevelPropertyWith(inserter.Replace), record)
+					err := writer.InsertFunc(ipnet, inserter.TopLevelPropertyWith(inserter.Replace), record)
+					if err != nil {
 						fmt.Printf("Warning: Skipping insert for %s: %v\n", cidr, err)
 					}
 				}
