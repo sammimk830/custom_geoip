@@ -10,7 +10,7 @@
   },
 
   "categories": {
-    "lan": {
+    "mylan": {
       "urls": [
         "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Lan/Lan.yaml"
       ],
@@ -18,7 +18,7 @@
       "inline_rules": [],
       "exclude_rules": []
     },
-    "apple": {
+    "myapple": {
       "urls": [
         "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/refs/heads/master/rule/Clash/Apple/Apple.yaml"
       ],
@@ -26,7 +26,7 @@
       "inline_rules": [],
       "exclude_rules": []
     },
-     "google": {
+     "mygoogle": {
       "urls": [
         "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/refs/heads/master/rule/Clash/Google/Google.yaml"
       ],
