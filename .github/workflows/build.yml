@@ -1,4 +1,4 @@
-name: Build Custom geoip.dat with Base MMDB
+name: Build Custom geoip.dat
 
 on:
   push:
@@ -18,6 +18,11 @@ jobs:
       - name: Checkout Repo
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -29,18 +34,30 @@ jobs:
         run: |
           echo "TIMESTAMP=$(TZ='Asia/Hong_Kong' date +'%Y%m%d%H%M%S')" >> $GITHUB_OUTPUT
 
-      - name: Build and Run MMDB Merger
-        run: |
-          go mod tidy
-          go run builder.go
+      - name: Process & Extract IP Rules (Python)
+        run: python convert.py
 
-      - name: Convert MMDB to geoip.dat
+      - name: Compile and Merge with Base MMDB using v2fly Tool
         run: |
-          # 下載 maxminddb-to-geoip 工具轉換為 v2ray geoip.dat 格式
           git clone --depth 1 https://github.com/v2fly/geoip.git compiler
-          cp Country.mmdb compiler/
+          
+          # 將自訂 data/ 資料夾複製到編譯器目錄
+          cp -r data compiler/
+          
+          # 如果成功下載了 base.mmdb，也複製過去供編譯器合併
+          if [ -f "base.mmdb" ]; then
+            cp base.mmdb compiler/
+          fi
+          
           cd compiler
-          go run ./ --input ./Country.mmdb --output ./output
+          
+          # 呼叫官方編譯工具 (如果存在 base.mmdb 會自動作為基礎合併)
+          if [ -f "base.mmdb" ]; then
+            go run ./ --input ./data --base ./base.mmdb --output ./output
+          else
+            go run ./ --input ./data --output ./output
+          fi
+          
           if [ -f "output/geoip.dat" ]; then
             mv output/geoip.dat ../geoip.dat
           fi
@@ -50,12 +67,10 @@ jobs:
         with:
           tag_name: ${{ steps.time.outputs.TIMESTAMP }}
           name: "${{ steps.time.outputs.TIMESTAMP }}"
-          body: "Auto-built geoip.dat with Base MMDB at ${{ steps.time.outputs.TIMESTAMP }}"
+          body: "Auto-built geoip.dat at ${{ steps.time.outputs.TIMESTAMP }}"
           draft: false
           prerelease: false
-          files: |
-            geoip.dat
-            Country.mmdb
+          files: geoip.dat
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -64,11 +79,9 @@ jobs:
         with:
           tag_name: release
           name: "Latest Release"
-          body: "Always points to the latest geoip.dat and Country.mmdb"
+          body: "Always points to the latest geoip.dat"
           draft: false
           prerelease: false
-          files: |
-            geoip.dat
-            Country.mmdb
+          files: geoip.dat
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
