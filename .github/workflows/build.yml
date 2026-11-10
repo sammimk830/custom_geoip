@@ -85,12 +85,18 @@ jobs:
         run: |
           set -euo pipefail
 
+          COMPILER_COMMIT="803b99b77354d910449eff3e8ecf70a6c8a524d3"
+
           rm -rf compiler
 
-          git clone \
+          git init compiler
+          git -C compiler remote add origin \
+            https://github.com/v2fly/geoip.git
+          git -C compiler fetch \
             --depth 1 \
-            https://github.com/v2fly/geoip.git \
-            compiler
+            origin \
+            "$COMPILER_COMMIT"
+          git -C compiler checkout --detach "$COMPILER_COMMIT"
 
           echo "Compiler commit:"
           git -C compiler rev-parse HEAD
